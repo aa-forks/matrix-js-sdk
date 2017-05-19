@@ -36,7 +36,6 @@ const EventTimeline = require("./models/event-timeline");
 import {InvalidStoreError} from './errors';
 
 const DEBUG = true;
-const USE_WEBSOCKET = true;
 
 // /sync requests allow you to set a timeout= but the request may continue
 // beyond that and wedge forever, so we need to track how long we are willing
@@ -560,19 +559,19 @@ SyncApi.prototype.sync = function() {
         }
 
         await savedSyncPromise;
-            if (USE_WEBSOCKET) {
-                self._websocket({ filterId: filterId });
-            } else {
-                self._sync({ filterId: filterId });
-            }
-        }
-
-    if (client.isGuest()) {
-        // no push rules for guests, no access to POST filter for guests.
         if (USE_WEBSOCKET) {
             self._websocket({ filterId: filterId });
         } else {
             self._sync({ filterId: filterId });
+        }
+    }
+
+    if (client.isGuest()) {
+        // no push rules for guests, no access to POST filter for guests.
+        if (USE_WEBSOCKET) {
+            self._websocket({});
+        } else {
+            self._sync({});
         }
     } else {
         // Pull the saved sync token out first, before the worker starts sending
@@ -609,9 +608,6 @@ SyncApi.prototype.stop = function() {
     if (this._keepAliveTimer) {
         clearTimeout(this._keepAliveTimer);
         this._keepAliveTimer = null;
-    }
-    if (this.ws) {
-	this.ws.close();
     }
 };
 
@@ -667,168 +663,6 @@ SyncApi.prototype._syncFromCache = async function(savedSync) {
     // so this would be useless and misleading.
     if (!this._storeIsInvalid) {
         this._updateSyncState("PREPARED", syncEventData);
-    }
-};
-
-/**
- * Alternative to use WebSockets instead of _sync (Long Polling) *
- * Invoke me as alternative to avoid /sync calls but use WebSocket instead
- * @param {Object} syncOptions
- * @param {string} syncOptions.filterId
- * @param {boolean} syncOptions.hasSyncedBefore
- */
-SyncApi.prototype._websocket = function(syncOptions) {
-    const client = this.client;
-    const self = this;
-
-    self.ws_syncOptions = syncOptions;
-
-    if (!this._running) {
-        debuglog("Sync no longer running: exiting.");
-        if (self._connectionReturnedDefer) {
-            self._connectionReturnedDefer.reject();
-            self._connectionReturnedDefer = null;
-        }
-        this._updateSyncState("STOPPED");
-        return;
-    }
-
-    let filterId = self.ws_syncOptions.filterId;
-    if (client.isGuest() && !filterId) {
-        filterId = this._getGuestFilter();
-    }
-
-    self.ws_syncToken = client.store.getSyncToken();
-
-    if (this.getSyncState() !== 'SYNCING' || this._catchingUp) {
-        // unless we are happily syncing already, we want the server to return
-        // as quickly as possible, even if there are no events queued. This
-        // serves two purposes:
-        //
-        // * When the connection dies, we want to know asap when it comes back,
-        //   so that we can hide the error from the user. (We don't want to
-        //   have to wait for an event or a timeout).
-        //
-        // * We want to know if the server has any to_device messages queued up
-        //   for us. We do that by calling it with a zero timeout until it
-        //   doesn't give us any more to_device messages.
-        this._catchingUp = true;
-    }
-
-    const qps = {
-        filter: filterId,
-    };
-
-    if (self.ws_syncToken) {
-        qps.since = self.ws_syncToken;
-    }
-
-    this._ws = client._http.generateWebSocket(qps);
-    this._ws.onopen = function(ev) {
-        debuglog("Connected to WebSocket: ", ev);
-    }
-    this._ws.onclose = function(ev) {
-        if (ev.wasClean) {
-            debuglog("Socket closed");
-        } else {
-            debuglog("Unclean close. Code: "+ev.code+" reason: "+ev.reason,
-                "error");
-
-            if (self.ws_syncOptions.hasSyncedBefore) {
-                // assume connection to websocket lost by mistake
-                debuglog("Reinit Connection via WebSocket");
-                self._websocket(self.ws_syncOptions);
-            } else {
-                debuglog("Connection via WebSocket seems to be not available. "
-                    + "Fallback to Long-Polling");
-                // remove variables used by WebSockets
-                let syncOptions = self.ws_syncOptions;
-                self.ws_syncOptions = null;
-                self.ws_syncToken = null;
-                self._sync(syncOptions);
-            }
-        }
-        //self._running = false;
-        //self.ws_syncOptions = null;
-        //self.ws_syncToken = null;
-    }
-
-    this._ws.onmessage = function(in_data) {
-        let data = JSON.parse(in_data.data);
-        //debuglog('Got new data from socket, next_batch=' + data.next_batch);
-
-        // set the sync token NOW *before* processing the events. We do this so
-        // if something barfs on an event we can skip it rather than constantly
-        // polling with the same token.
-        client.store.setSyncData(data);
-        client.store.setSyncToken(data.next_batch);
-
-        // Reset after a successful sync
-        self._failedSyncCount = 0;
-
-        try {
-            self._processSyncResponse(self.ws_syncToken, data);
-        } catch (e) {
-            // log the exception with stack if we have it, else fall back
-            // to the plain description
-            console.error("Caught /sync error (via WebSocket)", e.stack || e);
-        }
-
-        // emit synced events
-        const syncEventData = {
-            oldSyncToken: self.ws_syncToken,
-            nextSyncToken: data.next_batch,
-            catchingUp: self._catchingUp,
-        };
-
-        if (!self.ws_syncOptions.hasSyncedBefore) {
-            self._updateSyncState("PREPARED", syncEventData);
-            self.ws_syncOptions.hasSyncedBefore = true;
-	} else {
-            self._updateSyncState("SYNCING", syncEventData);
-
-            // tell databases that everything is now in a consistent state and can be
-            // saved (no point doing so if we only have the data we just got out of the
-            // store).
-            client.store.save();
-        }
-        self.ws_syncToken = data.next_batch;
-    }
-
-    this._ws.onerror = function(err) {
-        if (!self._running) {
-            debuglog("Sync no longer running: exiting");
-            if (self._connectionReturnedDefer) {
-                self._connectionReturnedDefer.reject();
-                self._connectionReturnedDefer = null;
-            }
-            self._updateSyncState("STOPPED");
-            return;
-        }
-        console.error("Websocket error %s", err);
-        console.error(err);
-
-        self._failedSyncCount++;
-        console.log('Number of consecutive failed sync requests:', self._failedSyncCount);
-
-        debuglog("Starting keep-alive");
-        // Note that we do *not* mark the sync connection as
-        // lost yet: we only do this if a keepalive poke
-        // fails, since long lived HTTP connections will
-        // go away sometimes and we shouldn't treat this as
-        // erroneous. We set the state to 'reconnecting'
-        // instead, so that clients can onserve this state
-        // if they wish.
-        self._startKeepAlives().done(function() {
-            debuglog("Restart Websocket");
-            self._websocket(self._ws_syncOptions);
-        });
-        self._currentSyncRequest = null;
-        // Transition from RECONNECTING to ERROR after a given number of failed syncs
-        self._updateSyncState(
-            self._failedSyncCount >= FAILED_SYNC_ERROR_THRESHOLD ?
-                "ERROR" : "RECONNECTING",
-        );
     }
 };
 
