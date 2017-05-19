@@ -3713,6 +3713,10 @@ MatrixClient.prototype.stopClient = function() {
     if (this._peekSync) {
         this._peekSync.stopPeeking();
     }
+    if (this._websocketApi) {
+        this._webSocketApi.stop();
+        this._webSocketApi = null;
+    }
     global.clearTimeout(this._checkTurnServersTimeoutID);
 };
 
