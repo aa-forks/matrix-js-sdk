@@ -3666,11 +3666,11 @@ MatrixClient.prototype.startClient = async function(opts) {
     };
     this._clientOpts = opts;
 
+    this._syncApi = new SyncApi(this, opts);
     if (this.useWebSockets) {
         this._websocketApi = new WebSocketApi(this, opts);
         this._websocketApi.start();
     } else {
-        this._syncApi = new SyncApi(this, opts);
         this._syncApi.sync();
     }
 };
@@ -3726,7 +3726,9 @@ MatrixClient.prototype.stopClient = function() {
 MatrixClient.prototype.connectionFallback = function(opts) {
     this.useWebSockets = false;
     console.log("Do Fallback to SyncAPI");
-    this._syncApi = new SyncApi(this, opts);
+    if (! this._syncApi) {
+        this._syncApi = new SyncApi(this, opts);
+    }
     this._syncApi.sync();
 };
 
