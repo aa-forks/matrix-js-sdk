@@ -356,6 +356,9 @@ MatrixClient.prototype.setForceTURN = function(forceTURN) {
  * @see module:client~MatrixClient#event:"sync"
  */
 MatrixClient.prototype.getSyncState = function() {
+    if (this.useWebSockets && this._websocketApi) {
+        return this._websocketApi.getSyncState();
+    }
     if (!this._syncApi) {
         return null;
     }
@@ -3679,6 +3682,11 @@ MatrixClient.prototype.startClient = async function(opts) {
         // This shouldn't happen since we thought the client was not running
         console.error("Still have sync object whilst not running: stopping old one");
         this._syncApi.stop();
+    }
+    if (this._websocketApi) {
+        console.error("Still have websocket object whilst not running: stopping old one");
+        this._websocketApi.stop();
+        this._websocketApi = null; // as this might be not used
     }
 
     // shallow-copy the opts dict before modifying and storing it
