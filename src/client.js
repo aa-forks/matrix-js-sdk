@@ -1759,6 +1759,9 @@ function _sendEvent(client, room, event, callback) {
 
         if (!promise) {
             //TODO Use WebSocketAPI
+            if (client.useWebSockets) {
+                promise = client._websocketApi.sendEvent(event);
+            }
             promise = _sendEventHttpRequest(client, event);
         }
         return promise;
@@ -3707,6 +3710,16 @@ MatrixClient.prototype.startClient = async function(opts) {
     if (this.useWebSockets) {
         this._websocketApi = new WebSocketApi(this, opts);
         this._websocketApi.start();
+
+        const self = this;
+        this.scheduler.setProcessFunction(function(eventToSend) {
+            const room = self.getRoom(eventToSend.getRoomId());
+            if (eventToSend.status !== EventStatus.SENDING) {
+                _updatePendingEventStatus(room, eventToSend,
+                                          EventStatus.SENDING);
+            }
+            return self._websocketApi.sendEvent(eventToSend);
+        });
     } else {
         this._syncApi.sync();
     }
@@ -3767,6 +3780,17 @@ MatrixClient.prototype.connectionFallback = function(opts) {
         this._syncApi = new SyncApi(this, opts);
     }
     this._syncApi.sync();
+
+    const self = this;
+    //TODO set new ProcessFunction that uses WebSocketApi
+    this.scheduler.setProcessFunction(function(eventToSend) {
+        const room = self.getRoom(eventToSend.getRoomId());
+        if (eventToSend.status !== EventStatus.SENDING) {
+            _updatePendingEventStatus(room, eventToSend,
+                                        EventStatus.SENDING);
+        }
+        return _sendEventHttpRequest(self, eventToSend);
+    });
 };
 
 /*
