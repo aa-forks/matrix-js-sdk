@@ -183,7 +183,7 @@ function MatrixClient(opts) {
     this.scheduler = opts.scheduler;
     if (this.scheduler) {
         const self = this;
-        //TODO set new ProcessFunction that uses WebSocketApi
+        // will be set to use WebSockets by WebSocketApi if needed
         this.scheduler.setProcessFunction(function(eventToSend) {
             const room = self.getRoom(eventToSend.getRoomId());
             if (eventToSend.status !== EventStatus.SENDING) {
@@ -573,7 +573,6 @@ MatrixClient.prototype.getDeviceEd25519Key = function() {
 /**
  * Upload the device keys to the homeserver.
  * @return {object} A promise that will resolve when the keys are uploaded.
- * TODO: Check/Propose key-uploading via WebSocket
  */
 MatrixClient.prototype.uploadKeys = function() {
     if (this._crypto === null) {
@@ -591,7 +590,6 @@ MatrixClient.prototype.uploadKeys = function() {
  *
  * @return {Promise} A promise which resolves to a map userId->deviceId->{@link
  * module:crypto~DeviceInfo|DeviceInfo}.
- * TODO: Check/Propose key-uploading via WebSocket
  */
 MatrixClient.prototype.downloadKeys = function(userIds, forceDownload) {
     if (this._crypto === null) {
@@ -1567,7 +1565,6 @@ MatrixClient.prototype.setRoomTopic = function(roomId, topic, callback) {
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Part of WebSocket-API?
  */
 MatrixClient.prototype.getRoomTags = function(roomId, callback) {
     const path = utils.encodeUri("/user/$userId/rooms/$roomId/tags/", {
@@ -1586,7 +1583,6 @@ MatrixClient.prototype.getRoomTags = function(roomId, callback) {
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Part of WebSocket-API?
  */
 MatrixClient.prototype.setRoomTag = function(roomId, tagName, metadata, callback) {
     const path = utils.encodeUri("/user/$userId/rooms/$roomId/tags/$tag", {
@@ -1605,7 +1601,6 @@ MatrixClient.prototype.setRoomTag = function(roomId, tagName, metadata, callback
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Part of WebSocket-API?
  */
 MatrixClient.prototype.deleteRoomTag = function(roomId, tagName, callback) {
     const path = utils.encodeUri("/user/$userId/rooms/$roomId/tags/$tag", {
@@ -1625,7 +1620,6 @@ MatrixClient.prototype.deleteRoomTag = function(roomId, tagName, callback) {
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Propose usage of WebSocketApi
  */
 MatrixClient.prototype.setRoomAccountData = function(roomId, eventType,
                                                      content, callback) {
@@ -1648,7 +1642,6 @@ MatrixClient.prototype.setRoomAccountData = function(roomId, eventType,
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Part of WebSocketApi?
  */
 MatrixClient.prototype.setPowerLevel = function(roomId, userId, powerLevel,
                                                 event, callback) {
@@ -2027,7 +2020,6 @@ MatrixClient.prototype.sendHtmlEmote = function(roomId, body, htmlBody, callback
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Propose/Implement usage of WebSocketApi
  */
 MatrixClient.prototype.sendReceipt = function(event, receiptType, callback) {
     if (this.isGuest()) {
@@ -2073,7 +2065,6 @@ MatrixClient.prototype.sendReadReceipt = function(event, callback) {
  * convenience because the RR and the RM are commonly updated at the same time as each
  * other. The local echo of this receipt will be done if set. Optional.
  * @return {module:client.Promise} Resolves: the empty object, {}.
- * TODO: Propose/Implement usage of WebSocketApi
  */
 MatrixClient.prototype.setRoomReadMarkers = function(roomId, eventId, rrEvent) {
     const rmEventId = eventId;
@@ -2136,7 +2127,6 @@ MatrixClient.prototype.getUrlPreview = function(url, ts, callback) {
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Propose/Implement usage of WebSocketApi
  */
 MatrixClient.prototype.sendTyping = function(roomId, isTyping, timeoutMs, callback) {
     if (this.isGuest()) {
@@ -2235,7 +2225,6 @@ MatrixClient.prototype.leave = function(roomId, callback) {
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Propose/Implement usage of WebSocketApi
  */
 MatrixClient.prototype.ban = function(roomId, userId, reason, callback) {
     return _membershipChange(this, roomId, userId, "ban", reason,
@@ -2249,7 +2238,6 @@ MatrixClient.prototype.ban = function(roomId, userId, reason, callback) {
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Propose/Implement usage of WebSocketApi
  */
 MatrixClient.prototype.forget = function(roomId, deleteRoom, callback) {
     if (deleteRoom === undefined) {
@@ -2274,7 +2262,6 @@ MatrixClient.prototype.forget = function(roomId, deleteRoom, callback) {
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: Object (currently empty)
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Propose/Implement usage of WebSocketApi
  */
 MatrixClient.prototype.unban = function(roomId, userId, callback) {
     // unbanning != set their state to leave: this used to be
@@ -2317,7 +2304,6 @@ MatrixClient.prototype.kick = function(roomId, userId, reason, callback) {
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Propose/Implement usage of WebSocketApi
  */
 function _setMembershipState(client, roomId, userId, membershipValue, reason,
                              callback) {
@@ -2346,7 +2332,6 @@ function _setMembershipState(client, roomId, userId, membershipValue, reason,
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Propose/Implement usage of WebSocketApi
  */
 function _membershipChange(client, roomId, userId, membership, reason, callback) {
     if (utils.isFunction(reason)) {
@@ -3693,7 +3678,7 @@ MatrixClient.prototype.startClient = async function(opts) {
     if (this._websocketApi) {
         console.error("Still have websocket object whilst not running: stopping old one");
         this._websocketApi.stop();
-        this._websocketApi = null; // as this might be not used
+        this._websocketApi = null;
     }
 
     // shallow-copy the opts dict before modifying and storing it
@@ -3787,7 +3772,6 @@ MatrixClient.prototype.connectionFallback = function(opts) {
     this._syncApi.sync();
 
     const self = this;
-    //TODO set new ProcessFunction that uses WebSocketApi
     this.scheduler.setProcessFunction(function(eventToSend) {
         const room = self.getRoom(eventToSend.getRoomId());
         if (eventToSend.status !== EventStatus.SENDING) {
