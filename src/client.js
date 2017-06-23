@@ -135,7 +135,7 @@ function keyFromRecoverySession(session, decryptionKey) {
  * @param {boolean} [opts.useAuthorizationHeader = false] Set to true to use
  * Authorization header instead of query param to send the access token to the server.
  * 
- * @param {boolean} opts.useWebSocket Optional. Set to false to prefer SyncAPI (long
+ * @param {boolean} opts.useWebSockets Optional. Set to false to prefer SyncAPI (long
  * polling) to WebSocketAPI. If not set WebSocketApi will be prefered.
  * Note: There is a fallback to SyncAPI if WebSocketAPI does not work
  *
@@ -217,9 +217,9 @@ function MatrixClient(opts) {
     this.urlPreviewCache = {};
     this._notifTimelineSet = null;
 
-    this.useWebSockets = true;
-    if (opts.useWebSocket) {
-        this.useWebSockets = Boolean(opts.useWebSocket);
+    this.useWebSockets = false;
+    if (opts.useWebSockets) {
+        this.useWebSockets = Boolean(opts.useWebSockets);
     }
 
     this._crypto = null;
@@ -1750,7 +1750,7 @@ function _sendEvent(client, room, event, callback) {
         }
 
         if (!promise) {
-            if (client.useWebSockets) {
+            if (client.useWebSockets && client._websocketApi) {
                 promise = client._websocketApi.sendEvent(event);
             }
             promise = _sendEventHttpRequest(client, event);
@@ -3696,7 +3696,7 @@ MatrixClient.prototype.startClient = async function(opts) {
     // WebsocketAPI uses some of SyncApi-functions - so need to be created before
     // TODO check if methods can be made static or moved to another class
     this._syncApi = new SyncApi(this, opts);
-    if (this.useWebSockets) {
+    if (this.useWebSockets && this._websocketApi) {
         this._websocketApi = new WebSocketApi(this, opts);
         this._websocketApi.start();
 
