@@ -60,6 +60,7 @@ export default function TestClient(
         deviceId: deviceId,
         sessionStore: sessionStore,
         request: this.httpBackend.requestFn,
+        useWebSockets: false,
     }, options);
     if (!options.cryptoStore) {
         // expose this so the tests can get to it
