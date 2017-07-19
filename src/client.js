@@ -2434,7 +2434,6 @@ MatrixClient.prototype._unstable_setStatusMessage = function(newMessage) {
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
  * @throws If 'presence' isn't a valid presence enum value.
- * TODO: Propose/Implement usage of WebSocketApi
  */
 MatrixClient.prototype.setPresence = function(opts, callback) {
     const path = utils.encodeUri("/presence/$userId/status", {
@@ -2448,6 +2447,9 @@ MatrixClient.prototype.setPresence = function(opts, callback) {
     const validStates = ["offline", "online", "unavailable"];
     if (validStates.indexOf(opts.presence) == -1) {
         throw new Error("Bad presence value: " + opts.presence);
+    }
+    if (this.useWebSockets && this._websocketApi) {
+        return this._websocketApi.sendPresence(opts);
     }
     return this._http.authedRequest(
         callback, "PUT", path, undefined, opts,
