@@ -415,10 +415,14 @@ module.exports.MatrixHttpApi.prototype = {
         }
 
         const _params = {
-            filter: queryParams.filter,
-            since: queryParams.since,
             access_token: queryParams.access_token,
         };
+        if (queryParams.since !== undefined) {
+            _params.since = queryParams.since;
+        }
+        if (queryParams.filter !== undefined) {
+            _params.filter = queryParams.filter;
+        }
         //TODO make query-path configuration somewhere else
         return new WebSocket(_base + "/_matrix/client/ws/r0?"
             + utils.encodeParams(_params), "m.json");
