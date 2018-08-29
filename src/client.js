@@ -183,7 +183,6 @@ function MatrixClient(opts) {
     this.scheduler = opts.scheduler;
     if (this.scheduler) {
         const self = this;
-        // will be set to use WebSockets by WebSocketApi if needed
         this.scheduler.setProcessFunction(function(eventToSend) {
             const room = self.getRoom(eventToSend.getRoomId());
             if (eventToSend.status !== EventStatus.SENDING) {
@@ -1989,6 +1988,7 @@ MatrixClient.prototype.sendHtmlEmote = function(roomId, body, htmlBody, callback
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
+ * TODO: Propose/Implement usage of WebSocketApi
  */
 MatrixClient.prototype.sendReceipt = function(event, receiptType, callback) {
     if (this.isGuest()) {
@@ -2017,7 +2017,6 @@ MatrixClient.prototype.sendReceipt = function(event, receiptType, callback) {
  * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Propose/Implement usage of WebSocketApi
  */
 MatrixClient.prototype.sendReadReceipt = function(event, callback) {
     return this.sendReceipt(event, "m.read", callback);
@@ -2445,7 +2444,7 @@ MatrixClient.prototype.setPresence = function(opts, callback) {
         throw new Error("Bad presence value: " + opts.presence);
     }
     if (this.useWebSockets && this._websocketApi) {
-        return this._websocketApi.sendPresence(opts);
+        return this._websocketApi.sendPresence(opts, callback);
     }
     return this._http.authedRequest(
         callback, "PUT", path, undefined, opts,
@@ -2487,7 +2486,7 @@ MatrixClient.prototype.inviteToPresenceList = function(callback, userIds) {
  * @param {string[]} userIds
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- */
+ **/
 MatrixClient.prototype.dropFromPresenceList = function(callback, userIds) {
   const opts = {"drop": userIds};
   return _presenceList(callback, this, opts, "POST");
@@ -2870,7 +2869,6 @@ MatrixClient.prototype.resetNotifTimelineSet = function() {
  * @param {String} roomId The room to attempt to peek into.
  * @return {module:client.Promise} Resolves: Room object
  * @return {module:http-api.MatrixError} Rejects: with an error response.
- * TODO: Propose/Implement usage of WebSocketApi (maybe separate for requesting /events)
  */
 MatrixClient.prototype.peekInRoom = function(roomId) {
     if (this._peekSync) {
