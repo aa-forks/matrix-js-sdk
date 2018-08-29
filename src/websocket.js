@@ -26,6 +26,7 @@ limitations under the License.
  * for HTTP and WS at some point.
  */
 import Promise from 'bluebird';
+const utils = require("./utils");
 const Filter = require("./filter");
 const MatrixError = require("./http-api").MatrixError;
 
@@ -43,7 +44,6 @@ function debuglog(...params) {
     }
     console.log(...params);
 }
-
 
 /**
  * <b>Internal class - unstable.</b>
@@ -261,11 +261,16 @@ WebSocketApi.prototype._handleResponseTimeout = function(messageId) {
         return;
     }
 
-    curObj.defer.reject(new MatrixError({
+    const err = new MatrixError({
         error: "Locally timed out waiting for a response",
         errcode: "ORG.MATRIX.JSSDK_TIMEOUT",
         timeout: this.ws_timeout,
-    }));
+    });
+    curObj.defer.reject(err);
+    const callback = this._awaiting_responses[messageId].callback;
+    if (utils.isFunction(callback)) {
+        callback(err);
+    }
     delete this._awaiting_responses[messageId];
 };
 
@@ -511,14 +516,21 @@ WebSocketApi.prototype.handleResponse = function(response) {
         self._ping_failed_already = false;
         return delete this._awaiting_responses[txnId];
     }
+    const callback = this._awaiting_responses[txnId].callback;
 
     if (response.result) {
         // success
         this._awaiting_responses[txnId].defer.resolve(response.result);
+        if (utils.isFunction(callback)) {
+            callback(null, response.result);
+        }
         return delete this._awaiting_responses[txnId];
     } else if (response.error) {
         //error
         this._awaiting_responses[txnId].defer.reject(response.error);
+        if (utils.isFunction(callback)) {
+            callback(response.error);
+        }
         return delete this._awaiting_responses[txnId];
     } else {
         console.error("response does not contain result nor error", response);
@@ -526,7 +538,13 @@ WebSocketApi.prototype.handleResponse = function(response) {
     }
 };
 
-WebSocketApi.prototype.sendObject = function(message) {
+/**
+ * Sends message through websocket with handling resend and Promise
+ * @param {*} message Prepared message to be send through websocket
+ * @param {module:client.callback} callback Optional.
+ * @return {module:client.Promise} Resolves: response result from websocket.
+ */
+WebSocketApi.prototype.sendObject = function(message, callback) {
     const defer = Promise.defer();
     if (!message.method) {
         return defer.reject("No method in sending object");
@@ -535,6 +553,7 @@ WebSocketApi.prototype.sendObject = function(message) {
 
     this._awaiting_responses[message.id] = {
         message: message,
+        callback: callback,
         defer: defer,
     };
 
@@ -595,11 +614,12 @@ WebSocketApi.prototype.sendPing = function() {
  * @param {Object} opts Options to apply
  * @param {string} opts.presence One of "online", "offline" or "unavailable"
  * @param {string} opts.status_msg The status message to attach.
+ * @param {module:client.callback} callback Optional.
  * @return {module:client.Promise} Resolves: TODO
  * @return {module:http-api.MatrixError} Rejects: with an error response.
  * @throws If 'presence' isn't a valid presence enum value.
  */
-WebSocketApi.prototype.sendPresence = function(opts) {
+WebSocketApi.prototype.sendPresence = function(opts, callback) {
     const validStates = ["offline", "online", "unavailable"];
     if (validStates.indexOf(opts.presence) == -1) {
         throw new Error("Bad presence value: " + opts.presence);
@@ -617,7 +637,7 @@ WebSocketApi.prototype.sendPresence = function(opts) {
         message.params.status_msg = opts.status_msg;
     }
 
-    return this.sendObject(message);
+    return this.sendObject(message, callback);
 };
 
 /**
@@ -671,7 +691,7 @@ WebSocketApi.prototype.sendTyping = function(roomId, isTyping, timeoutMs, callba
         message.params.timeout = timeoutMs ? timeoutMs : 20000;
     }
 
-    return this.sendObject(message);
+    return this.sendObject(message, callback);
 };
 
 /**
