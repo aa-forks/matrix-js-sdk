@@ -3701,6 +3701,11 @@ MatrixClient.prototype.stopClient = function() {
 
     this.clientRunning = false;
     // TODO: f.e. Room => self.store.storeRoom(room) ?
+    // WebSocketApi calls a method from SyncApi so this has to be stopped before
+    if (this._websocketApi) {
+        this._websocketApi.stop();
+        this._websocketApi = null;
+    }
     if (this._syncApi) {
         this._syncApi.stop();
         this._syncApi = null;
@@ -3710,10 +3715,6 @@ MatrixClient.prototype.stopClient = function() {
     }
     if (this._peekSync) {
         this._peekSync.stopPeeking();
-    }
-    if (this._websocketApi) {
-        this._websocketApi.stop();
-        this._websocketApi = null;
     }
     global.clearTimeout(this._checkTurnServersTimeoutID);
 };
