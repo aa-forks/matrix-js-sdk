@@ -74,6 +74,7 @@ function WebSocketApi(client, opts) {
     this.opts = opts;
     this._websocket = null;
     this._syncState = null;
+    this._syncStateData = null; // additional data (eg. error object for failed sync)
     this._running = false;
 
     this.ws_timeout = 20000;
@@ -149,9 +150,49 @@ WebSocketApi.prototype.start = function() {
             getPushRules();
             return;
         }
+        checkLazyLoadStatus(); // advance to the next stage
+    }
+
+    // copied from sync.js to trigger websocket and not long polling start at the end
+    const checkLazyLoadStatus = async () => {
+        if (this.opts.lazyLoadMembers && client.isGuest()) {
+            this.opts.lazyLoadMembers = false;
+        }
+        if (this.opts.lazyLoadMembers) {
+            const supported = await client.doesServerSupportLazyLoading();
+            if (supported) {
+                this.opts.filter = await client.createFilter(
+                    Filter.LAZY_LOADING_SYNC_FILTER,
+                );
+            } else {
+                console.log("LL: lazy loading requested but not supported " +
+                    "by server, so disabling");
+                this.opts.lazyLoadMembers = false;
+            }
+        }
+        // need to vape the store when enabling LL and wasn't enabled before
+        const shouldClear = await client._syncApi._wasLazyLoadingToggled(this.opts.lazyLoadMembers);
+        if (shouldClear) {
+            this._storeIsInvalid = true;
+            const reason = InvalidStoreError.TOGGLED_LAZY_LOADING;
+            const error = new InvalidStoreError(reason, !!this.opts.lazyLoadMembers);
+            this._updateSyncState("ERROR", { error });
+            // bail out of the sync loop now: the app needs to respond to this error.
+            // we leave the state as 'ERROR' which isn't great since this normally means
+            // we're retrying. The client must be stopped before clearing the stores anyway
+            // so the app should stop the client, clear the store and start it again.
+            console.warn("InvalidStoreError: store is not usable: stopping sync.");
+            return;
+        }
+        if (this.opts.lazyLoadMembers && this._crypto) {
+            this.opts.crypto.enableLazyLoading();
+        }
+        await this.client._storeClientOptions();
+
         getFilter(); // Now get the filter and start syncing
     }
 
+    // copied from sync.js to trigger websocket and not long polling start at the end
     async function getFilter() {
         let filter;
         if (self.opts.filter) {
