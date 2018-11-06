@@ -30,6 +30,8 @@ const utils = require("./utils");
 const Filter = require("./filter");
 const MatrixError = require("./http-api").MatrixError;
 
+import {InvalidStoreError} from './errors';
+
 const DEBUG = true;
 
 function getFilterName(userId, suffix) {
@@ -45,6 +47,7 @@ function debuglog(...params) {
     console.log(...params);
 }
 
+
 /**
  * <b>Internal class - unstable.</b>
  * Construct an entity which is able to use Websockets to comunicate with a homeserver.
@@ -57,6 +60,8 @@ function debuglog(...params) {
  * SAFELY remove events from this room. It may not be safe to remove events if
  * there are other references to the timelines for this room.
  * Default: returns false.
+ * @param {Boolean=} opts.disablePresence True to perform syncing without automatically
+ * updating presence.
  */
 function WebSocketApi(client, opts) {
     this.client = client;
@@ -73,8 +78,9 @@ function WebSocketApi(client, opts) {
     }
     this.opts = opts;
     this._websocket = null;
-    this._syncState = null;
-    this._syncStateData = null; // additional data (eg. error object for failed sync)
+    // tracked by syncApi
+    // this._syncState = null;
+    // this._syncStateData
     this._running = false;
 
     this.ws_timeout = 20000;
@@ -94,15 +100,6 @@ WebSocketApi.prototype.reconnectNow = function() {
     console.err("WebSocketApi.reconnectNow() not implemented");
     //TODO Implement
     return false;
-};
-
-/**
- * Returns the current state of this sync object
- * @see module:client~MatrixClient#event:"sync"
- * @return {?String}
- */
-WebSocketApi.prototype.getSyncState = function() {
-    return this._syncState;
 };
 
 /**
@@ -136,6 +133,8 @@ WebSocketApi.prototype.start = function() {
     //   1) We need to get push rules so we can check if events should bing as we get
     //      them from /sync.
     //   2) We need to get/create a filter which we can use for /sync.
+    //   3) We need to check the lazy loading option matches what was used in the
+    //       stored sync. If it doesn't, we can't use the stored sync.
 
     async function getPushRules() {
         try {
@@ -176,7 +175,7 @@ WebSocketApi.prototype.start = function() {
             this._storeIsInvalid = true;
             const reason = InvalidStoreError.TOGGLED_LAZY_LOADING;
             const error = new InvalidStoreError(reason, !!this.opts.lazyLoadMembers);
-            this._updateSyncState("ERROR", { error });
+            self.client._syncApi._updateSyncState("ERROR", { error });
             // bail out of the sync loop now: the app needs to respond to this error.
             // we leave the state as 'ERROR' which isn't great since this normally means
             // we're retrying. The client must be stopped before clearing the stores anyway
@@ -210,7 +209,7 @@ WebSocketApi.prototype.start = function() {
         } catch (err) {
             // wait for saved sync to complete before doing anything else,
             // otherwise the sync state will end up being incorrect
-            await self.recoverFromSyncStartupError(savedSyncPromise, err);
+            await client._syncApi.recoverFromSyncStartupError(savedSyncPromise, err);
             getFilter();
             return;
         }
@@ -220,6 +219,7 @@ WebSocketApi.prototype.start = function() {
         // /notifications API somehow.
         client.resetNotifTimelineSet();
 
+        // Now wait for the saved sync to finish...
         await savedSyncPromise;
         self._start({ filterId });
     }
@@ -231,9 +231,7 @@ WebSocketApi.prototype.start = function() {
         // Pull the saved sync token out first, before the worker starts sending
         // all the sync data which could take a while. This will let us send our
         // first incremental sync request before we've processed our saved data.
-        savedSyncPromise = client.store.getSavedSyncToken().then((tok) => {
-            return client.store.getSavedSync();
-        }).then((savedSync) => {
+        savedSyncPromise = client.store.getSavedSync().then((savedSync) => {
             if (savedSync) {
                 return client._syncApi._syncFromCache(savedSync);
             }
@@ -340,6 +338,10 @@ WebSocketApi.prototype.stop = function() {
     if (this._websocket) {
         this._websocket.close();
         this._websocket = null;
+    }
+    if (this.ws_keepAliveTimer) {
+        clearTimeout(this.ws_keepAliveTimer);
+        this.ws_keepAliveTimer = null;
     }
     this.client._syncApi._updateSyncState("STOPPED");
 };
@@ -485,11 +487,17 @@ WebSocketApi.prototype._start_websocket = function(qps) {
 
         // reset var to not kill the socket after the first ping timeout
         self._ping_failed_already = false;
-
+        if (!self._running) {
+            // websocket got closed by client => do not reconnect
+            return
+        }
         if (self.ws_possible) {
             // assume connection to websocket lost by mistake
             debuglog("Reinit Connection via WebSocket");
-            self.client._syncApi._updateSyncState("RECONNECTING");
+            self.client._syncApi._updateSyncState(
+                "RECONNECTING",
+                { error: Error("WebSocket got closed but a connection was possible") },
+            );
             self.client._syncApi._startKeepAlives().done(function() {
                 debuglog("Restart Websocket");
                 self._start(self.ws_syncOptions);
@@ -510,7 +518,6 @@ WebSocketApi.prototype._start_websocket = function(qps) {
         self._init_keepalive();
 
         const data = JSON.parse(inData.data);
-
         if (data.method) {
             switch (data.method) {
                 case "ping":
