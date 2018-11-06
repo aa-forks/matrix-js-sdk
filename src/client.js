@@ -325,9 +325,6 @@ MatrixClient.prototype.setForceTURN = function(forceTURN) {
  * @see module:client~MatrixClient#event:"sync"
  */
 MatrixClient.prototype.getSyncState = function() {
-    if (this.useWebSockets && this._websocketApi) {
-        return this._websocketApi.getSyncState();
-    }
     if (!this._syncApi) {
         return null;
     }
