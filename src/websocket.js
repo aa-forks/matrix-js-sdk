@@ -170,7 +170,9 @@ WebSocketApi.prototype.start = function() {
             }
         }
         // need to vape the store when enabling LL and wasn't enabled before
-        const shouldClear = await client._syncApi._wasLazyLoadingToggled(this.opts.lazyLoadMembers);
+        const shouldClear = await client._syncApi._wasLazyLoadingToggled(
+            this.opts.lazyLoadMembers,
+        );
         if (shouldClear) {
             this._storeIsInvalid = true;
             const reason = InvalidStoreError.TOGGLED_LAZY_LOADING;
@@ -189,7 +191,7 @@ WebSocketApi.prototype.start = function() {
         await this.client._storeClientOptions();
 
         getFilter(); // Now get the filter and start syncing
-    }
+    };
 
     // copied from sync.js to trigger websocket and not long polling start at the end
     async function getFilter() {
@@ -489,7 +491,7 @@ WebSocketApi.prototype._start_websocket = function(qps) {
         self._ping_failed_already = false;
         if (!self._running) {
             // websocket got closed by client => do not reconnect
-            return
+            return;
         }
         if (self.ws_possible) {
             // assume connection to websocket lost by mistake
