@@ -57,6 +57,7 @@ import {encodeBase64, decodeBase64} from "./crypto/olmlib";
 import { User } from "./models/user";
 import {AutoDiscovery} from "./autodiscovery";
 import {DEHYDRATION_ALGORITHM} from "./crypto/dehydration";
+import {WebSocketApi} from './websocket';
 
 const SCROLLBACK_DELAY_MS = 3000;
 export const CRYPTO_ENABLED = isCryptoAvailable();
@@ -285,6 +286,7 @@ function keyFromRecoverySession(session, decryptionKey) {
  *     the secret as returned by {@link module:client~MatrixClient#checkDeviceTrust}.
  */
 export function MatrixClient(opts) {
+    if (typeof opts.useWebSockets === "undefined") opts.useWebSockets = true;
     opts.baseUrl = utils.ensureNoTrailingSlash(opts.baseUrl);
     opts.idBaseUrl = utils.ensureNoTrailingSlash(opts.idBaseUrl);
 

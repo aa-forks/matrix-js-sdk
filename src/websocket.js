@@ -24,11 +24,10 @@ limitations under the License.
  * an alternative syncing API, we may want to have a proper syncing interface
  * for HTTP and WS at some point.
  */
-import Promise from 'bluebird';
-const Filter = require("./filter");
-const MatrixError = require("./http-api").MatrixError;
+import {Filter} from "./filter";
+import {MatrixError} from "./http-api";
 
-const DEBUG = true;
+const DEBUG = false;
 
 function getFilterName(userId, suffix) {
     // scope this on the user ID because people may login on many accounts
@@ -57,7 +56,7 @@ function debuglog() {
  * there are other references to the timelines for this room.
  * Default: returns false.
  */
-function WebSocketApi(client, opts) {
+export function WebSocketApi(client, opts) {
     this.client = client;
     opts = opts || {};
     opts.initialSyncLimit = (
@@ -134,12 +133,12 @@ WebSocketApi.prototype.start = function() {
     //   2) We need to get/create a filter which we can use for /sync.
 
     function getPushRules() {
-        client.getPushRules().done((result) => {
+        client.getPushRules().then((result) => {
             debuglog("Got push rules");
             client.pushRules = result;
             getFilter(); // Now get the filter and start syncing
         }, function(err) {
-            client._syncApi._startKeepAlives().done(function() {
+            client._syncApi._startKeepAlives().then(function() {
                 getPushRules();
             });
             self._updateSyncState("ERROR", { error: err });
@@ -157,7 +156,7 @@ WebSocketApi.prototype.start = function() {
 
         client.getOrCreateFilter(
             getFilterName(client.credentials.userId), filter,
-        ).done((filterId) => {
+        ).then((filterId) => {
             // reset the notifications timeline to prepare it to paginate from
             // the current point in time.
             // The right solution would be to tie /sync pagination tokens into
@@ -166,7 +165,7 @@ WebSocketApi.prototype.start = function() {
 
             self._start({ filterId });
         }, function(err) {
-            client._syncApi._startKeepAlives().done(function() {
+            client._syncApi._startKeepAlives().then(function() {
                 getFilter();
             });
             self._updateSyncState("ERROR", { error: err });
@@ -342,7 +341,7 @@ WebSocketApi.prototype._start = async function(syncOptions) {
         );
         data = await this._currentSyncRequest;
     } catch (e) {
-        client._syncApi._startKeepAlives().done(() => {
+        client._syncApi._startKeepAlives().then(() => {
             debuglog("Starting with initial sync failed (", e, "). Retries");
             this._start(syncOptions);
         });
@@ -447,7 +446,7 @@ WebSocketApi.prototype._start_websocket = function(qps) {
             // assume connection to websocket lost by mistake
             debuglog("Reinit Connection via WebSocket");
             self._updateSyncState("RECONNECTING");
-            self.client._syncApi._startKeepAlives().done(function() {
+            self.client._syncApi._startKeepAlives().then(function() {
                 debuglog("Restart Websocket");
                 self._start(self.ws_syncOptions);
             });
@@ -568,27 +567,31 @@ WebSocketApi.prototype.handleSync = async function(data) {
 };
 
 WebSocketApi.prototype.sendObject = function(message) {
-    const defer = Promise.defer();
-    if (!message.method) {
-        return defer.reject("No method in sending object");
-    }
-    message.id = message.id || this.client.makeTxnId();
+    const defer = new Promise((resolve, reject) => {
+        if (!message.method) {
+            return reject("No method in sending object");
+        }
+        message.id = message.id || this.client.makeTxnId();
 
-    this._awaiting_responses[message.id] = {
-        message: message,
-        defer: defer,
-    };
+        this._awaiting_responses[message.id] = {
+            message: message,
+            defer: {
+                resolve,
+                reject
+            },
+        };
 
-    if (this._websocket == null || this._websocket.readyState != WebSocket.OPEN) {
-        debuglog("WebSocket is not ready. Postponing", message);
-        this._pendingSend.push(message);
-        this._awaiting_responses[message.id].pending = true;
-    } else {
-        this._websocket.send(JSON.stringify(message));
-    }
-
-    setTimeout(this._handleResponseTimeout.bind(this, message.id), this.ws_timeout/2);
-    return defer.promise;
+        if (this._websocket == null || this._websocket.readyState != WebSocket.OPEN) {
+            debuglog("WebSocket is not ready. Postponing", message);
+            this._pendingSend.push(message);
+            this._awaiting_responses[message.id].pending = true;
+        } else {
+            this._websocket.send(JSON.stringify(message));
+        }
+    
+        setTimeout(this._handleResponseTimeout.bind(this, message.id), this.ws_timeout/2);
+    });
+    return defer;
 };
 
 /**
@@ -721,6 +724,8 @@ WebSocketApi.prototype.sendTyping = function(roomId, isTyping, timeoutMs, callba
  * @param {Object} data Object of additional data to emit in the event
  */
 WebSocketApi.prototype._updateSyncState = function(newState, data) {
+    // console.log(newState, data);
+    if (typeof data === 'undefined') data = {};
     const old = this._syncState;
     this._syncState = newState;
     this.client.emit("sync", this._syncState, old, data);
@@ -736,6 +741,3 @@ WebSocketApi.prototype._onOnline = function() {
     debuglog("Browser thinks we are back online");
     this.client._syncApi._startKeepAlives(0);
 };
-
-/** */
-module.exports = WebSocketApi;
