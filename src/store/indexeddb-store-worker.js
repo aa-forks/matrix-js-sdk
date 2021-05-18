@@ -1,6 +1,7 @@
 /*
 Copyright 2017 Vector Creations Ltd
 Copyright 2018 New Vector Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,8 +16,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import Promise from 'bluebird';
-import LocalIndexedDBStoreBackend from "./indexeddb-local-backend.js";
+import {LocalIndexedDBStoreBackend} from "./indexeddb-local-backend.js";
+import {logger} from '../logger';
 
 /**
  * This class lives in the webworker and drives a LocalIndexedDBStoreBackend
@@ -33,7 +34,7 @@ import LocalIndexedDBStoreBackend from "./indexeddb-local-backend.js";
  * avoid a dependency on the whole js-sdk.
  *
  */
-class IndexedDBStoreWorker {
+export class IndexedDBStoreWorker {
     /**
      * @param {function} postMessage The web worker postMessage function that
      * should be used to communicate back to the main script.
@@ -122,15 +123,15 @@ class IndexedDBStoreWorker {
             return;
         }
 
-        prom.done((ret) => {
+        prom.then((ret) => {
             this.postMessage.call(null, {
                 command: 'cmd_success',
                 seq: msg.seq,
                 result: ret,
             });
         }, (err) => {
-            console.error("Error running command: "+msg.command);
-            console.error(err);
+            logger.error("Error running command: "+msg.command);
+            logger.error(err);
             this.postMessage.call(null, {
                 command: 'cmd_fail',
                 seq: msg.seq,
@@ -143,5 +144,3 @@ class IndexedDBStoreWorker {
         });
     }
 }
-
-module.exports = IndexedDBStoreWorker;

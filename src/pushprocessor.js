@@ -15,7 +15,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import {escapeRegExp, globToRegexp} from "./utils";
+import {escapeRegExp, globToRegexp, isNullOrUndefined} from "./utils";
+import {logger} from './logger';
 
 /**
  * @module pushprocessor
@@ -23,22 +24,76 @@ import {escapeRegExp, globToRegexp} from "./utils";
 
 const RULEKINDS_IN_ORDER = ['override', 'content', 'room', 'sender', 'underride'];
 
+// The default override rules to apply to the push rules that arrive from the server.
+// We do this for two reasons:
+//   1. Synapse is unlikely to send us the push rule in an incremental sync - see
+//      https://github.com/matrix-org/synapse/pull/4867#issuecomment-481446072 for
+//      more details.
+//   2. We often want to start using push rules ahead of the server supporting them,
+//      and so we can put them here.
+const DEFAULT_OVERRIDE_RULES = [
+    {
+        // For homeservers which don't support MSC1930 yet
+        rule_id: ".m.rule.tombstone",
+        default: true,
+        enabled: true,
+        conditions: [
+            {
+                kind: "event_match",
+                key: "type",
+                pattern: "m.room.tombstone",
+            },
+            {
+                kind: "event_match",
+                key: "state_key",
+                pattern: "",
+            },
+        ],
+        actions: [
+            "notify",
+            {
+                set_tweak: "highlight",
+                value: true,
+            },
+        ],
+    },
+    {
+        // For homeservers which don't support MSC2153 yet
+        rule_id: ".m.rule.reaction",
+        default: true,
+        enabled: true,
+        conditions: [
+            {
+                kind: "event_match",
+                key: "type",
+                pattern: "m.reaction",
+            },
+        ],
+        actions: [
+            "dont_notify",
+        ],
+    },
+];
+
 /**
  * Construct a Push Processor.
  * @constructor
  * @param {Object} client The Matrix client object to use
  */
-function PushProcessor(client) {
+export function PushProcessor(client) {
     const cachedGlobToRegex = {
         // $glob: RegExp,
     };
 
-    const matchingRuleFromKindSet = (ev, kindset, device) => {
+    const matchingRuleFromKindSet = (ev, kindset) => {
         for (let ruleKindIndex = 0;
                 ruleKindIndex < RULEKINDS_IN_ORDER.length;
                 ++ruleKindIndex) {
             const kind = RULEKINDS_IN_ORDER[ruleKindIndex];
             const ruleset = kindset[kind];
+            if (!ruleset) {
+                continue;
+            }
 
             for (let ruleIndex = 0; ruleIndex < ruleset.length; ++ruleIndex) {
                 const rule = ruleset[ruleIndex];
@@ -46,7 +101,7 @@ function PushProcessor(client) {
                     continue;
                 }
 
-                const rawrule = templateRuleToRaw(kind, rule, device);
+                const rawrule = templateRuleToRaw(kind, rule);
                 if (!rawrule) {
                     continue;
                 }
@@ -60,7 +115,7 @@ function PushProcessor(client) {
         return null;
     };
 
-    const templateRuleToRaw = function(kind, tprule, device) {
+    const templateRuleToRaw = function(kind, tprule) {
         const rawrule = {
             'rule_id': tprule.rule_id,
             'actions': tprule.actions,
@@ -102,19 +157,12 @@ function PushProcessor(client) {
                 });
                 break;
         }
-        if (device) {
-            rawrule.conditions.push({
-                'kind': 'device',
-                'profile_tag': device,
-            });
-        }
         return rawrule;
     };
 
     const eventFulfillsCondition = function(cond, ev) {
         const condition_functions = {
             "event_match": eventFulfillsEventMatchCondition,
-            "device": eventFulfillsDeviceCondition,
             "contains_display_name": eventFulfillsDisplayNameCondition,
             "room_member_count": eventFulfillsRoomMemberCountCondition,
             "sender_notification_permission": eventFulfillsSenderNotifPermCondition,
@@ -206,22 +254,22 @@ function PushProcessor(client) {
         return content.body.search(pat) > -1;
     };
 
-    const eventFulfillsDeviceCondition = function(cond, ev) {
-        return false; // XXX: Allow a profile tag to be set for the web client instance
-    };
-
     const eventFulfillsEventMatchCondition = function(cond, ev) {
         if (!cond.key) {
             return false;
         }
 
         const val = valueForDottedKey(cond.key, ev);
-        if (!val || typeof val != 'string') {
+        if (typeof val !== 'string') {
             return false;
         }
 
         if (cond.value) {
             return cond.value === val;
+        }
+
+        if (typeof cond.pattern !== 'string') {
+            return false;
         }
 
         let regex;
@@ -252,10 +300,10 @@ function PushProcessor(client) {
 
         // special-case the first component to deal with encrypted messages
         const firstPart = parts[0];
-        if (firstPart == 'content') {
+        if (firstPart === 'content') {
             val = ev.getContent();
             parts.shift();
-        } else if (firstPart == 'type') {
+        } else if (firstPart === 'type') {
             val = ev.getType();
             parts.shift();
         } else {
@@ -264,33 +312,23 @@ function PushProcessor(client) {
         }
 
         while (parts.length > 0) {
-            const thispart = parts.shift();
-            if (!val[thispart]) {
+            const thisPart = parts.shift();
+            if (isNullOrUndefined(val[thisPart])) {
                 return null;
             }
-            val = val[thispart];
+            val = val[thisPart];
         }
         return val;
     };
 
     const matchingRuleForEventWithRulesets = function(ev, rulesets) {
-        if (!rulesets || !rulesets.device) {
+        if (!rulesets) {
             return null;
         }
-        if (ev.getSender() == client.credentials.userId) {
+        if (ev.getSender() === client.credentials.userId) {
             return null;
         }
 
-        const allDevNames = Object.keys(rulesets.device);
-        for (let i = 0; i < allDevNames.length; ++i) {
-            const devname = allDevNames[i];
-            const devrules = rulesets.device[devname];
-
-            const matchingRule = matchingRuleFromKindSet(devrules, devname);
-            if (matchingRule) {
-                return matchingRule;
-            }
-        }
         return matchingRuleFromKindSet(ev, rulesets.global);
     };
 
@@ -341,7 +379,7 @@ function PushProcessor(client) {
      * @return {object} The push rule, or null if no such rule was found
      */
     this.getPushRuleById = function(ruleId) {
-        for (const scope of ['device', 'global']) {
+        for (const scope of ['global']) {
             if (client.pushRules[scope] === undefined) continue;
 
             for (const kind of RULEKINDS_IN_ORDER) {
@@ -381,6 +419,45 @@ PushProcessor.actionListToActionsObject = function(actionlist) {
 };
 
 /**
+ * Rewrites conditions on a client's push rules to match the defaults
+ * where applicable. Useful for upgrading push rules to more strict
+ * conditions when the server is falling behind on defaults.
+ * @param {object} incomingRules The client's existing push rules
+ * @returns {object} The rewritten rules
+ */
+PushProcessor.rewriteDefaultRules = function(incomingRules) {
+    let newRules = JSON.parse(JSON.stringify(incomingRules)); // deep clone
+
+    // These lines are mostly to make the tests happy. We shouldn't run into these
+    // properties missing in practice.
+    if (!newRules) newRules = {};
+    if (!newRules.global) newRules.global = {};
+    if (!newRules.global.override) newRules.global.override = [];
+
+    // Merge the client-level defaults with the ones from the server
+    const globalOverrides = newRules.global.override;
+    for (const override of DEFAULT_OVERRIDE_RULES) {
+        const existingRule = globalOverrides
+            .find((r) => r.rule_id === override.rule_id);
+
+        if (existingRule) {
+            // Copy over the actions, default, and conditions. Don't touch the user's
+            // preference.
+            existingRule.default = override.default;
+            existingRule.conditions = override.conditions;
+            existingRule.actions = override.actions;
+        } else {
+            // Add the rule
+            const ruleId = override.rule_id;
+            logger.warn(`Adding default global override for ${ruleId}`);
+            globalOverrides.push(override);
+        }
+    }
+
+    return newRules;
+};
+
+/**
  * @typedef {Object} PushAction
  * @type {Object}
  * @property {boolean} notify Whether this event should notify the user or not.
@@ -391,6 +468,4 @@ PushProcessor.actionListToActionsObject = function(actionlist) {
  * noise.
  */
 
-/** The PushProcessor class. */
-module.exports = PushProcessor;
 

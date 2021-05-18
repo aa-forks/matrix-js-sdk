@@ -10,10 +10,8 @@ build/Release
 coverage
 lib-cov
 out
-reports
 /dist
 /lib
-/specbuild
 
 # version file and tarball created by `npm pack` / `yarn pack`
 /git-revision.txt

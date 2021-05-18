@@ -1,5 +1,6 @@
 /*
 Copyright 2015, 2016 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,14 +14,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
  * This is an internal module which manages queuing, scheduling and retrying
  * of requests.
  * @module scheduler
  */
-const utils = require("./utils");
-import Promise from 'bluebird';
+import * as utils from "./utils";
+import {logger} from './logger';
 
 const DEBUG = false;  // set true to enable console logging.
 
@@ -36,7 +37,7 @@ const DEBUG = false;  // set true to enable console logging.
  * algorithm to apply when determining which events should be sent before the
  * given event. Defaults to {@link module:scheduler~MatrixScheduler.QUEUE_MESSAGES}.
  */
-function MatrixScheduler(retryAlgorithm, queueAlgorithm) {
+export function MatrixScheduler(retryAlgorithm, queueAlgorithm) {
     this.retryAlgorithm = retryAlgorithm || MatrixScheduler.RETRY_BACKOFF_RATELIMIT;
     this.queueAlgorithm = queueAlgorithm || MatrixScheduler.QUEUE_MESSAGES;
     this._queues = {
@@ -64,7 +65,7 @@ MatrixScheduler.prototype.getQueueForEvent = function(event) {
     if (!name || !this._queues[name]) {
         return null;
     }
-    return utils.map(this._queues[name], function(obj) {
+    return this._queues[name].map(function(obj) {
         return obj.event;
     });
 };
@@ -120,7 +121,7 @@ MatrixScheduler.prototype.queueEvent = function(event) {
     if (!this._queues[queueName]) {
         this._queues[queueName] = [];
     }
-    const defer = Promise.defer();
+    const defer = utils.defer();
     this._queues[queueName].push({
         event: event,
         defer: defer,
@@ -156,9 +157,14 @@ MatrixScheduler.RETRY_BACKOFF_RATELIMIT = function(event, attempts, err) {
         return -1;
     }
 
+    // if event that we are trying to send is too large in any way then retrying won't help
+    if (err.name === "M_TOO_LARGE") {
+        return -1;
+    }
+
     if (err.name === "M_LIMIT_EXCEEDED") {
         const waitTime = err.data.retry_after_ms;
-        if (waitTime) {
+        if (waitTime > 0) {
             return waitTime;
         }
     }
@@ -176,7 +182,8 @@ MatrixScheduler.RETRY_BACKOFF_RATELIMIT = function(event, attempts, err) {
  * @see module:scheduler~queueAlgorithm
  */
 MatrixScheduler.QUEUE_MESSAGES = function(event) {
-    if (event.getType() === "m.room.message") {
+    // enqueue messages or events that associate with another event (redactions and relations)
+    if (event.getType() === "m.room.message" || event.hasAssocation()) {
         // put these events in the 'message' queue.
         return "message";
     }
@@ -189,16 +196,18 @@ function _startProcessingQueues(scheduler) {
         return;
     }
     // for each inactive queue with events in them
-    utils.forEach(utils.filter(utils.keys(scheduler._queues), function(queueName) {
-        return scheduler._activeQueues.indexOf(queueName) === -1 &&
-                scheduler._queues[queueName].length > 0;
-    }), function(queueName) {
-        // mark the queue as active
-        scheduler._activeQueues.push(queueName);
-        // begin processing the head of the queue
-        debuglog("Spinning up queue: '%s'", queueName);
-        _processQueue(scheduler, queueName);
-    });
+    Object.keys(scheduler._queues)
+        .filter(function(queueName) {
+            return scheduler._activeQueues.indexOf(queueName) === -1 &&
+                    scheduler._queues[queueName].length > 0;
+        })
+        .forEach(function(queueName) {
+            // mark the queue as active
+            scheduler._activeQueues.push(queueName);
+            // begin processing the head of the queue
+            debuglog("Spinning up queue: '%s'", queueName);
+            _processQueue(scheduler, queueName);
+        });
 }
 
 function _processQueue(scheduler, queueName) {
@@ -219,7 +228,14 @@ function _processQueue(scheduler, queueName) {
     );
     // fire the process function and if it resolves, resolve the deferred. Else
     // invoke the retry algorithm.
-    scheduler._procFn(obj.event).done(function(res) {
+
+    // First wait for a resolved promise, so the resolve handlers for
+    // the deferred of the previously sent event can run.
+    // This way enqueued relations/redactions to enqueued events can receive
+    // the remove id of their target before being sent.
+    Promise.resolve().then(() => {
+        return scheduler._procFn(obj.event);
+    }).then(function(res) {
         // remove this from the queue
         _removeNextEvent(scheduler, queueName);
         debuglog("Queue '%s' sent event %s", queueName, obj.event.getId());
@@ -253,7 +269,7 @@ function _processQueue(scheduler, queueName) {
 
 function _peekNextEvent(scheduler, queueName) {
     const queue = scheduler._queues[queueName];
-    if (!utils.isArray(queue)) {
+    if (!Array.isArray(queue)) {
         return null;
     }
     return queue[0];
@@ -261,7 +277,7 @@ function _peekNextEvent(scheduler, queueName) {
 
 function _removeNextEvent(scheduler, queueName) {
     const queue = scheduler._queues[queueName];
-    if (!utils.isArray(queue)) {
+    if (!Array.isArray(queue)) {
         return null;
     }
     return queue.shift();
@@ -269,7 +285,7 @@ function _removeNextEvent(scheduler, queueName) {
 
 function debuglog() {
     if (DEBUG) {
-        console.log(...arguments);
+        logger.log(...arguments);
     }
 }
 
@@ -310,7 +326,3 @@ function debuglog() {
  * @return {Promise} Resolved/rejected depending on the outcome of the request.
  */
 
-/**
- * The MatrixScheduler class.
- */
-module.exports = MatrixScheduler;

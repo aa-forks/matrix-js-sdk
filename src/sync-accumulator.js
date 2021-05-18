@@ -1,6 +1,7 @@
 /*
 Copyright 2017 Vector Creations Ltd
 Copyright 2018 New Vector Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,8 +21,8 @@ limitations under the License.
  * @module sync-accumulator
  */
 
-import utils from "./utils";
-
+import {logger} from './logger';
+import {deepCopy} from "./utils";
 
 /**
  * The purpose of this class is to accumulate /sync responses such that a
@@ -33,7 +34,7 @@ import utils from "./utils";
  * be loaded from disk and incremental syncs can be performed on the server,
  * rather than asking the server to do an initial sync on startup.
  */
-class SyncAccumulator {
+export class SyncAccumulator {
     /**
      * @param {Object} opts
      * @param {Number=} opts.maxTimelineEntries The ideal maximum number of
@@ -86,8 +87,8 @@ class SyncAccumulator {
         };
     }
 
-    accumulate(syncResponse) {
-        this._accumulateRooms(syncResponse);
+    accumulate(syncResponse, fromDatabase) {
+        this._accumulateRooms(syncResponse, fromDatabase);
         this._accumulateGroups(syncResponse);
         this._accumulateAccountData(syncResponse);
         this.nextBatch = syncResponse.next_batch;
@@ -106,35 +107,36 @@ class SyncAccumulator {
     /**
      * Accumulate incremental /sync room data.
      * @param {Object} syncResponse the complete /sync JSON
+     * @param {boolean} fromDatabase True if the sync response is one saved to the database
      */
-    _accumulateRooms(syncResponse) {
+    _accumulateRooms(syncResponse, fromDatabase) {
         if (!syncResponse.rooms) {
             return;
         }
         if (syncResponse.rooms.invite) {
             Object.keys(syncResponse.rooms.invite).forEach((roomId) => {
                 this._accumulateRoom(
-                    roomId, "invite", syncResponse.rooms.invite[roomId],
+                    roomId, "invite", syncResponse.rooms.invite[roomId], fromDatabase,
                 );
             });
         }
         if (syncResponse.rooms.join) {
             Object.keys(syncResponse.rooms.join).forEach((roomId) => {
                 this._accumulateRoom(
-                    roomId, "join", syncResponse.rooms.join[roomId],
+                    roomId, "join", syncResponse.rooms.join[roomId], fromDatabase,
                 );
             });
         }
         if (syncResponse.rooms.leave) {
             Object.keys(syncResponse.rooms.leave).forEach((roomId) => {
                 this._accumulateRoom(
-                    roomId, "leave", syncResponse.rooms.leave[roomId],
+                    roomId, "leave", syncResponse.rooms.leave[roomId], fromDatabase,
                 );
             });
         }
     }
 
-    _accumulateRoom(roomId, category, data) {
+    _accumulateRoom(roomId, category, data, fromDatabase) {
         // Valid /sync state transitions
         //       +--------+ <======+            1: Accept an invite
         //   +== | INVITE |        | (5)        2: Leave a room
@@ -158,7 +160,7 @@ class SyncAccumulator {
                     delete this.inviteRooms[roomId];
                 }
                 // (3)
-                this._accumulateJoinState(roomId, data);
+                this._accumulateJoinState(roomId, data, fromDatabase);
                 break;
             case "leave":
                 if (this.inviteRooms[roomId]) { // (4)
@@ -168,7 +170,7 @@ class SyncAccumulator {
                 }
                 break;
             default:
-                console.error("Unknown cateogory: ", category);
+                logger.error("Unknown cateogory: ", category);
         }
     }
 
@@ -202,7 +204,7 @@ class SyncAccumulator {
     }
 
     // Accumulate timeline and state events in a room.
-    _accumulateJoinState(roomId, data) {
+    _accumulateJoinState(roomId, data, fromDatabase) {
         // We expect this function to be called a lot (every /sync) so we want
         // this to be fast. /sync stores events in an array but we often want
         // to clobber based on type/state_key. Rather than convert arrays to
@@ -336,8 +338,20 @@ class SyncAccumulator {
                 setState(currentData._currentState, e);
                 // append the event to the timeline. The back-pagination token
                 // corresponds to the first event in the timeline
+                let transformedEvent;
+                if (!fromDatabase) {
+                    transformedEvent = Object.assign({}, e);
+                    if (transformedEvent.unsigned !== undefined) {
+                        transformedEvent.unsigned = Object.assign({}, transformedEvent.unsigned);
+                    }
+                    const age = e.unsigned ? e.unsigned.age : e.age;
+                    if (age !== undefined) transformedEvent._localTs = Date.now() - age;
+                } else {
+                    transformedEvent = e;
+                }
+
                 currentData._timeline.push({
-                    event: e,
+                    event: transformedEvent,
                     token: index === 0 ? data.timeline.prev_batch : null,
                 });
             });
@@ -404,6 +418,7 @@ class SyncAccumulator {
      * represents all room data that should be stored. This should be paired
      * with the sync token which represents the most recent /sync response
      * provided to accumulate().
+     * @param {boolean} forDatabase True to generate a sync to be saved to storage
      * @return {Object} An object with a "nextBatch", "roomsData" and "accountData"
      * keys.
      * The "nextBatch" key is a string which represents at what point in the
@@ -413,7 +428,7 @@ class SyncAccumulator {
      * /sync response from the 'rooms' key onwards. The "accountData" key is
      * a list of raw events which represent global account data.
      */
-    getJSON() {
+    getJSON(forDatabase) {
         const data = {
             join: {},
             invite: {},
@@ -485,7 +500,28 @@ class SyncAccumulator {
                     }
                     roomJson.timeline.prev_batch = msgData.token;
                 }
-                roomJson.timeline.events.push(msgData.event);
+
+                let transformedEvent;
+                if (!forDatabase && msgData.event._localTs) {
+                    // This means we have to copy each event so we can fix it up to
+                    // set a correct 'age' parameter whilst keeping the local timestamp
+                    // on our stored event. If this turns out to be a bottleneck, it could
+                    // be optimised either by doing this in the main process after the data
+                    // has been structured-cloned to go between the worker & main process,
+                    // or special-casing data from saved syncs to read the local timstamp
+                    // directly rather than turning it into age to then immediately be
+                    // transformed back again into a local timestamp.
+                    transformedEvent = Object.assign({}, msgData.event);
+                    if (transformedEvent.unsigned !== undefined) {
+                        transformedEvent.unsigned = Object.assign({}, transformedEvent.unsigned);
+                    }
+                    delete transformedEvent._localTs;
+                    transformedEvent.unsigned = transformedEvent.unsigned || {};
+                    transformedEvent.unsigned.age = Date.now() - msgData.event._localTs;
+                } else {
+                    transformedEvent = msgData.event;
+                }
+                roomJson.timeline.events.push(transformedEvent);
             });
 
             // Add state data: roll back current state to the start of timeline,
@@ -501,7 +537,7 @@ class SyncAccumulator {
                 // since we're going back in time, we need to use the previous
                 // state value else we'll break causality. We don't have the
                 // complete previous state event, so we need to create one.
-                const prevStateEvent = utils.deepCopy(timelineEvent);
+                const prevStateEvent = deepCopy(timelineEvent);
                 if (prevStateEvent.unsigned) {
                     if (prevStateEvent.unsigned.prev_content) {
                         prevStateEvent.content = prevStateEvent.unsigned.prev_content;
@@ -553,5 +589,3 @@ function setState(eventMap, event) {
     }
     eventMap[event.type][event.state_key] = event;
 }
-
-module.exports = SyncAccumulator;

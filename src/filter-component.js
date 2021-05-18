@@ -1,5 +1,6 @@
 /*
 Copyright 2016 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +14,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
  * @module filter-component
  */
@@ -45,7 +46,7 @@ function _matches_wildcard(actual_value, filter_value) {
  * @constructor
  * @param {Object} filter_json the definition of this filter JSON, e.g. { 'contains_url': true }
  */
-function FilterComponent(filter_json) {
+export function FilterComponent(filter_json) {
     this.filter_json = filter_json;
 
     this.types = filter_json.types || null;
@@ -107,8 +108,9 @@ FilterComponent.prototype._checkFields =
         }
 
         const allowed_values = self[name];
-        if (allowed_values) {
-            if (!allowed_values.map(match_func)) {
+        if (allowed_values && allowed_values.length > 0) {
+            const anyMatch = allowed_values.some(match_func);
+            if (!anyMatch) {
                 return false;
             }
         }
@@ -141,6 +143,3 @@ FilterComponent.prototype.filter = function(events) {
 FilterComponent.prototype.limit = function() {
     return this.filter_json.limit !== undefined ? this.filter_json.limit : 10;
 };
-
-/** The FilterComponent class */
-module.exports = FilterComponent;

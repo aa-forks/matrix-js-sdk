@@ -1,6 +1,7 @@
 /*
 Copyright 2017 Vector Creations Ltd
 Copyright 2018 New Vector Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +16,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import Promise from 'bluebird';
+import {logger} from '../logger';
+import {defer} from '../utils';
 
 /**
  * An IndexedDB store backend where the actual backend sits in a web
@@ -29,7 +31,7 @@ import Promise from 'bluebird';
  * to open the same database.
  * @param {Object} workerApi The web worker compatible interface object
  */
-const RemoteIndexedDBStoreBackend = function RemoteIndexedDBStoreBackend(
+export function RemoteIndexedDBStoreBackend(
     workerScript, dbName, workerApi,
 ) {
     this._workerScript = workerScript;
@@ -44,7 +46,7 @@ const RemoteIndexedDBStoreBackend = function RemoteIndexedDBStoreBackend(
     // Once we start connecting, we keep the promise and re-use it
     // if we try to connect again
     this._startPromise = null;
-};
+}
 
 
 RemoteIndexedDBStoreBackend.prototype = {
@@ -140,7 +142,7 @@ RemoteIndexedDBStoreBackend.prototype = {
 
             // tell the worker the db name.
             this._startPromise = this._doCmd('_setupWorker', [this._dbName]).then(() => {
-                console.log("IndexedDB worker is ready");
+                logger.log("IndexedDB worker is ready");
             });
         }
         return this._startPromise;
@@ -151,7 +153,7 @@ RemoteIndexedDBStoreBackend.prototype = {
         // the promise automatically gets rejected
         return Promise.resolve().then(() => {
             const seq = this._nextSeq++;
-            const def = Promise.defer();
+            const def = defer();
 
             this._inFlight[seq] = def;
 
@@ -170,13 +172,13 @@ RemoteIndexedDBStoreBackend.prototype = {
 
         if (msg.command == 'cmd_success' || msg.command == 'cmd_fail') {
             if (msg.seq === undefined) {
-                console.error("Got reply from worker with no seq");
+                logger.error("Got reply from worker with no seq");
                 return;
             }
 
             const def = this._inFlight[msg.seq];
             if (def === undefined) {
-                console.error("Got reply for unknown seq " + msg.seq);
+                logger.error("Got reply for unknown seq " + msg.seq);
                 return;
             }
             delete this._inFlight[msg.seq];
@@ -189,9 +191,7 @@ RemoteIndexedDBStoreBackend.prototype = {
                 def.reject(error);
             }
         } else {
-            console.warn("Unrecognised message from worker: " + msg);
+            logger.warn("Unrecognised message from worker: " + msg);
         }
     },
 };
-
-export default RemoteIndexedDBStoreBackend;

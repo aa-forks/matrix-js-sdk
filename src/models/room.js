@@ -1,6 +1,7 @@
 /*
 Copyright 2015, 2016 OpenMarket Ltd
-Copyright 2018 New Vector Ltd
+Copyright 2018, 2019 New Vector Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,22 +15,22 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
  * @module models/room
  */
-const EventEmitter = require("events").EventEmitter;
 
-const EventStatus = require("./event").EventStatus;
-const RoomSummary = require("./room-summary");
-const RoomMember = require("./room-member");
-const MatrixEvent = require("./event").MatrixEvent;
-const utils = require("../utils");
-const ContentRepo = require("../content-repo");
-const EventTimeline = require("./event-timeline");
-const EventTimelineSet = require("./event-timeline-set");
-
-import ReEmitter from '../ReEmitter';
+import {EventEmitter} from "events";
+import {EventTimelineSet} from "./event-timeline-set";
+import {EventTimeline} from "./event-timeline";
+import {getHttpUriForMxc} from "../content-repo";
+import * as utils from "../utils";
+import {EventStatus, MatrixEvent} from "./event";
+import {RoomMember} from "./room-member";
+import {RoomSummary} from "./room-summary";
+import {logger} from '../logger';
+import {ReEmitter} from '../ReEmitter';
+import {EventType, RoomCreateTypeField, RoomType} from "../@types/event";
 
 // These constants are used as sane defaults when the homeserver doesn't support
 // the m.room_versions capability. In practice, KNOWN_SAFE_ROOM_VERSION should be
@@ -37,8 +38,8 @@ import ReEmitter from '../ReEmitter';
 // room versions which are considered okay for people to run without being asked
 // to upgrade (ie: "stable"). Eventually, we should remove these when all homeservers
 // return an m.room_versions capability.
-const KNOWN_SAFE_ROOM_VERSION = '1';
-const SAFE_ROOM_VERSIONS = ['1', '2'];
+const KNOWN_SAFE_ROOM_VERSION = '6';
+const SAFE_ROOM_VERSIONS = ['1', '2', '3', '4', '5', '6'];
 
 function synthesizeReceipt(userId, event, receiptType) {
     // console.log("synthesizing receipt for "+event.getId());
@@ -92,9 +93,12 @@ function synthesizeReceipt(userId, event, receiptType) {
  * "<b>detached</b>", pending messages will appear in a separate list,
  * accessbile via {@link module:models/room#getPendingEvents}. Default:
  * "chronological".
- *
  * @param {boolean} [opts.timelineSupport = false] Set to true to enable improved
  * timeline support.
+ * @param {boolean} [opts.unstableClientRelationAggregation = false]
+ * Optional. Set to true to enable client-side aggregation of event relations
+ * via `EventTimelineSet#getRelationsForEvent`.
+ * This feature is currently unstable and the API may change without notice.
  *
  * @prop {string} roomId The ID of this room.
  * @prop {string} name The human-readable display name for this room.
@@ -115,9 +119,15 @@ function synthesizeReceipt(userId, event, receiptType) {
  * @prop {*} storageToken A token which a data store can use to remember
  * the state of the room.
  */
-function Room(roomId, client, myUserId, opts) {
+export function Room(roomId, client, myUserId, opts) {
     opts = opts || {};
     opts.pendingEventOrdering = opts.pendingEventOrdering || "chronological";
+
+    this._client = client;
+
+    // In some cases, we add listeners for every displayed Matrix event, so it's
+    // common to have quite a few more than the default limit.
+    this.setMaxListeners(100);
 
     this.reEmitter = new ReEmitter(this);
 
@@ -181,6 +191,18 @@ function Room(roomId, client, myUserId, opts) {
 
     if (this._opts.pendingEventOrdering == "detached") {
         this._pendingEventList = [];
+        const serializedPendingEventList = client._sessionStore.store.getItem(pendingEventsKey(this.roomId));
+        if (serializedPendingEventList) {
+            JSON.parse(serializedPendingEventList)
+                .forEach(async serializedEvent => {
+                    const event = new MatrixEvent(serializedEvent);
+                    if (event.getType() === "m.room.encrypted") {
+                        await event.attemptDecryption(this._client._crypto);
+                    }
+                    event.setStatus(EventStatus.NOT_SENT);
+                    this.addPendingEvent(event, event.getTxnId());
+                });
+        }
     }
 
     // read by megolm; boolean value - null indicates "use global value"
@@ -189,7 +211,6 @@ function Room(roomId, client, myUserId, opts) {
     this._summaryHeroes = null;
     // awaited by getEncryptionTargetMembers while room members are loading
 
-    this._client = client;
     if (!this._opts.lazyLoadMembers) {
         this._membersPromise = Promise.resolve();
     } else {
@@ -197,7 +218,60 @@ function Room(roomId, client, myUserId, opts) {
     }
 }
 
+/**
+ * @param {string} roomId ID of the current room
+ * @returns {string} Storage key to retrieve pending events
+ */
+function pendingEventsKey(roomId) {
+    return `mx_pending_events_${roomId}`;
+}
+
 utils.inherits(Room, EventEmitter);
+
+
+/**
+ * Bulk decrypt critical events in a room
+ *
+ * Critical events represents the minimal set of events to decrypt
+ * for a typical UI to function properly
+ *
+ * - Last event of every room (to generate likely message preview)
+ * - All events up to the read receipt (to calculate an accurate notification count)
+ *
+ * @returns {Promise} Signals when all events have been decrypted
+ */
+Room.prototype.decryptCriticalEvents = function() {
+    const readReceiptEventId = this.getEventReadUpTo(this._client.getUserId(), true);
+    const events = this.getLiveTimeline().getEvents();
+    const readReceiptTimelineIndex = events.findIndex(matrixEvent => {
+        return matrixEvent.event.event_id === readReceiptEventId;
+    });
+
+    const decryptionPromises = events
+        .slice(readReceiptTimelineIndex)
+        .filter(event => event.shouldAttemptDecryption())
+        .reverse()
+        .map(event => event.attemptDecryption(this._client._crypto, { isRetry: true }));
+
+    return Promise.allSettled(decryptionPromises);
+};
+
+/**
+ * Bulk decrypt events in a room
+ *
+ * @returns {Promise} Signals when all events have been decrypted
+ */
+Room.prototype.decryptAllEvents = function() {
+    const decryptionPromises = this
+        .getUnfilteredTimelineSet()
+        .getLiveTimeline()
+        .getEvents()
+        .filter(event => event.shouldAttemptDecryption())
+        .reverse()
+        .map(event => event.attemptDecryption(this._client._crypto, { isRetry: true }));
+
+    return Promise.allSettled(decryptionPromises);
+};
 
 /**
  * Gets the version of the room
@@ -206,7 +280,7 @@ utils.inherits(Room, EventEmitter);
 Room.prototype.getVersion = function() {
     const createEvent = this.currentState.getStateEvents("m.room.create", "");
     if (!createEvent) {
-        console.warn("Room " + this.room_id + " does not have an m.room.create event");
+        logger.warn("[getVersion] Room " + this.roomId + " does not have an m.room.create event");
         return '1';
     }
     const ver = createEvent.getContent()['room_version'];
@@ -259,7 +333,36 @@ Room.prototype.getRecommendedVersion = async function() {
         }
     }
 
+    let result = this._checkVersionAgainstCapability(versionCap);
+    if (result.urgent && result.needsUpgrade) {
+        // Something doesn't feel right: we shouldn't need to update
+        // because the version we're on should be in the protocol's
+        // namespace. This usually means that the server was updated
+        // before the client was, making us think the newest possible
+        // room version is not stable. As a solution, we'll refresh
+        // the capability we're using to determine this.
+        logger.warn(
+            "Refreshing room version capability because the server looks " +
+            "to be supporting a newer room version we don't know about.",
+        );
+
+        const caps = await this._client.getCapabilities(true);
+        versionCap = caps["m.room_versions"];
+        if (!versionCap) {
+            logger.warn("No room version capability - assuming upgrade required.");
+            return result;
+        } else {
+            result = this._checkVersionAgainstCapability(versionCap);
+        }
+    }
+
+    return result;
+};
+
+Room.prototype._checkVersionAgainstCapability = function(versionCap) {
     const currentVersion = this.getVersion();
+    logger.log(`[${this.roomId}] Current version: ${currentVersion}`);
+    logger.log(`[${this.roomId}] Version capability: `, versionCap);
 
     const result = {
         version: currentVersion,
@@ -268,7 +371,7 @@ Room.prototype.getRecommendedVersion = async function() {
     };
 
     // If the room is on the default version then nothing needs to change
-    if (currentVersion === versionCap.default) return Promise.resolve(result);
+    if (currentVersion === versionCap.default) return result;
 
     const stableVersions = Object.keys(versionCap.available)
         .filter((v) => versionCap.available[v] === 'stable');
@@ -280,12 +383,17 @@ Room.prototype.getRecommendedVersion = async function() {
         result.version = versionCap.default;
         result.needsUpgrade = true;
         result.urgent = !!this.getVersion().match(/^[0-9]+[0-9.]*$/g);
-        return Promise.resolve(result);
+        if (result.urgent) {
+            logger.warn(`URGENT upgrade required on ${this.roomId}`);
+        } else {
+            logger.warn(`Non-urgent upgrade required on ${this.roomId}`);
+        }
+        return result;
     }
 
     // The room is on a stable, but non-default, version by this point.
     // No upgrade needed.
-    return Promise.resolve(result);
+    return result;
 };
 
 /**
@@ -308,11 +416,65 @@ Room.prototype.userMayUpgradeRoom = function(userId) {
 Room.prototype.getPendingEvents = function() {
     if (this._opts.pendingEventOrdering !== "detached") {
         throw new Error(
-            "Cannot call getPendingEventList with pendingEventOrdering == " +
+            "Cannot call getPendingEvents with pendingEventOrdering == " +
                 this._opts.pendingEventOrdering);
     }
 
     return this._pendingEventList;
+};
+
+/**
+ * Removes a pending event for this room
+ *
+ * @param {string} eventId
+ * @return {boolean} True if an element was removed.
+ */
+Room.prototype.removePendingEvent = function(eventId) {
+    if (this._opts.pendingEventOrdering !== "detached") {
+        throw new Error(
+            "Cannot call removePendingEvent with pendingEventOrdering == " +
+                this._opts.pendingEventOrdering);
+    }
+
+    const removed = utils.removeElement(
+        this._pendingEventList,
+        function(ev) {
+            return ev.getId() == eventId;
+        }, false,
+    );
+
+    this._savePendingEvents();
+
+    return removed;
+};
+
+/**
+ * Check whether the pending event list contains a given event by ID.
+ * If pending event ordering is not "detached" then this returns false.
+ *
+ * @param {string} eventId The event ID to check for.
+ * @return {boolean}
+ */
+Room.prototype.hasPendingEvent = function(eventId) {
+    if (this._opts.pendingEventOrdering !== "detached") {
+        return false;
+    }
+
+    return this._pendingEventList.some(event => event.getId() === eventId);
+};
+
+/**
+ * Get a specific event from the pending event list, if configured, null otherwise.
+ *
+ * @param {string} eventId The event ID to check for.
+ * @return {MatrixEvent}
+ */
+Room.prototype.getPendingEvent = function(eventId) {
+    if (this._opts.pendingEventOrdering !== "detached") {
+        return null;
+    }
+
+    return this._pendingEventList.find(event => event.getId() === eventId);
 };
 
 /**
@@ -322,6 +484,23 @@ Room.prototype.getPendingEvents = function() {
  */
 Room.prototype.getLiveTimeline = function() {
     return this.getUnfilteredTimelineSet().getLiveTimeline();
+};
+
+
+/**
+ * Get the timestamp of the last message in the room
+ *
+ * @return {number} the timestamp of the last message in the room
+ */
+Room.prototype.getLastActiveTimestamp = function() {
+    const timeline = this.getLiveTimeline();
+    const events = timeline.getEvents();
+    if (events.length) {
+        const lastEvent = events[events.length - 1];
+        return lastEvent.getTs();
+    } else {
+        return Number.MIN_SAFE_INTEGER;
+    }
 };
 
 /**
@@ -461,7 +640,7 @@ Room.prototype._loadMembers = async function() {
     if (rawMembersEvents === null) {
         fromServer = true;
         rawMembersEvents = await this._loadMembersFromServer();
-        console.log(`LL: got ${rawMembersEvents.length} ` +
+        logger.log(`LL: got ${rawMembersEvents.length} ` +
             `members from server for room ${this.roomId}`);
     }
     const memberEvents = rawMembersEvents.map(this._client.getEventMapper());
@@ -489,7 +668,7 @@ Room.prototype.loadMembersIfNeeded = function() {
     const inMemoryUpdate = this._loadMembers().then((result) => {
         this.currentState.setOutOfBandMembers(result.memberEvents);
         // now the members are loaded, start to track the e2e devices if needed
-        if (this._client.isRoomEncrypted(this.roomId)) {
+        if (this._client.isCryptoEnabled() && this._client.isRoomEncrypted(this.roomId)) {
             this._client._crypto.trackRoomDevices(this.roomId);
         }
         return result.fromServer;
@@ -505,21 +684,21 @@ Room.prototype.loadMembersIfNeeded = function() {
             const oobMembers = this.currentState.getMembers()
                 .filter((m) => m.isOutOfBand())
                 .map((m) => m.events.member.event);
-            console.log(`LL: telling store to write ${oobMembers.length}`
+            logger.log(`LL: telling store to write ${oobMembers.length}`
                 + ` members for room ${this.roomId}`);
             const store = this._client.store;
             return store.setOutOfBandMembers(this.roomId, oobMembers)
                 // swallow any IDB error as we don't want to fail
                 // because of this
                 .catch((err) => {
-                    console.log("LL: storing OOB room members failed, oh well",
+                    logger.log("LL: storing OOB room members failed, oh well",
                         err);
                 });
         }
     }).catch((err) => {
         // as this is not awaited anywhere,
         // at least show the error in the console
-        console.error(err);
+        logger.error(err);
     });
 
     this._membersPromise = inMemoryUpdate;
@@ -545,9 +724,9 @@ Room.prototype.clearLoadedMembersIfNeeded = async function() {
  */
 Room.prototype._cleanupAfterLeaving = function() {
     this.clearLoadedMembersIfNeeded().catch((err) => {
-        console.error(`error after clearing loaded members from ` +
+        logger.error(`error after clearing loaded members from ` +
             `room ${this.roomId} after leaving`);
-        console.dir(err);
+        logger.log(err);
     });
 };
 
@@ -591,6 +770,11 @@ Room.prototype._fixUpLegacyTimelineFields = function() {
 
 /**
  * Returns whether there are any devices in the room that are unverified
+ *
+ * Note: Callers should first check if crypto is enabled on this device. If it is
+ * disabled, then we aren't tracking room devices at all, so we can't answer this, and an
+ * error will be thrown.
+ *
  * @return {bool} the result
  */
 Room.prototype.hasUnverifiedDevices = async function() {
@@ -599,7 +783,7 @@ Room.prototype.hasUnverifiedDevices = async function() {
     }
     const e2eMembers = await this.getEncryptionTargetMembers();
     for (const member of e2eMembers) {
-        const devices = await this._client.getStoredDevicesForUser(member.userId);
+        const devices = this._client.getStoredDevicesForUser(member.userId);
         if (devices.some((device) => device.isUnverified())) {
             return true;
         }
@@ -720,12 +904,12 @@ Room.prototype.getBlacklistUnverifiedDevices = function() {
  * @param {string} resizeMethod The thumbnail resize method to use, either
  * "crop" or "scale".
  * @param {boolean} allowDefault True to allow an identicon for this room if an
- * avatar URL wasn't explicitly set. Default: true.
+ * avatar URL wasn't explicitly set. Default: true. (Deprecated)
  * @return {?string} the avatar URL or null.
  */
 Room.prototype.getAvatarUrl = function(baseUrl, width, height, resizeMethod,
                                        allowDefault) {
-    const roomAvatarEvent = this.currentState.getStateEvents("m.room.avatar", "");
+    const roomAvatarEvent = this.currentState.getStateEvents(EventType.RoomAvatar, "");
     if (allowDefault === undefined) {
         allowDefault = true;
     }
@@ -735,16 +919,21 @@ Room.prototype.getAvatarUrl = function(baseUrl, width, height, resizeMethod,
 
     const mainUrl = roomAvatarEvent ? roomAvatarEvent.getContent().url : null;
     if (mainUrl) {
-        return ContentRepo.getHttpUriForMxc(
+        return getHttpUriForMxc(
             baseUrl, mainUrl, width, height, resizeMethod,
-        );
-    } else if (allowDefault) {
-        return ContentRepo.getIdenticonUri(
-            baseUrl, this.roomId, width, height,
         );
     }
 
     return null;
+};
+
+/**
+ * Get the mxc avatar url for the room, if one was set.
+ * @return {string} the mxc avatar url or falsy
+ */
+Room.prototype.getMxcAvatarUrl = function() {
+    const roomAvatarEvent = this.currentState.getStateEvents(EventType.RoomAvatar, "");
+    return roomAvatarEvent ? roomAvatarEvent.getContent().url : null;
 };
 
 /**
@@ -754,20 +943,26 @@ Room.prototype.getAvatarUrl = function(baseUrl, width, height, resizeMethod,
  * @return {array} The room's alias as an array of strings
  */
 Room.prototype.getAliases = function() {
-    const alias_strings = [];
+    const aliasStrings = [];
 
-    const alias_events = this.currentState.getStateEvents("m.room.aliases");
-    if (alias_events) {
-        for (let i = 0; i < alias_events.length; ++i) {
-            const alias_event = alias_events[i];
-            if (utils.isArray(alias_event.getContent().aliases)) {
-                Array.prototype.push.apply(
-                    alias_strings, alias_event.getContent().aliases,
-                );
+    const aliasEvents = this.currentState.getStateEvents("m.room.aliases");
+    if (aliasEvents) {
+        for (let i = 0; i < aliasEvents.length; ++i) {
+            const aliasEvent = aliasEvents[i];
+            if (Array.isArray(aliasEvent.getContent().aliases)) {
+                const filteredAliases = aliasEvent.getContent().aliases.filter(a => {
+                    if (typeof(a) !== "string") return false;
+                    if (a[0] !== '#') return false;
+                    if (!a.endsWith(`:${aliasEvent.getStateKey()}`)) return false;
+
+                    // It's probably valid by here.
+                    return true;
+                });
+                Array.prototype.push.apply(aliasStrings, filteredAliases);
             }
         }
     }
-    return alias_strings;
+    return aliasStrings;
 };
 
 /**
@@ -779,9 +974,21 @@ Room.prototype.getAliases = function() {
 Room.prototype.getCanonicalAlias = function() {
     const canonicalAlias = this.currentState.getStateEvents("m.room.canonical_alias", "");
     if (canonicalAlias) {
-        return canonicalAlias.getContent().alias;
+        return canonicalAlias.getContent().alias || null;
     }
     return null;
+};
+
+/**
+ * Get this room's alternative aliases
+ * @return {array} The room's alternative aliases, or an empty array
+ */
+Room.prototype.getAltAliases = function() {
+    const canonicalAlias = this.currentState.getStateEvents("m.room.canonical_alias", "");
+    if (canonicalAlias) {
+        return canonicalAlias.getContent().alt_aliases || [];
+    }
+    return [];
 };
 
 /**
@@ -817,15 +1024,24 @@ Room.prototype.addEventsToTimeline = function(events, toStartOfTimeline,
  * @return {RoomMember} The member or <code>null</code>.
  */
  Room.prototype.getMember = function(userId) {
-    return this.currentState.getMember(userId);
+     return this.currentState.getMember(userId);
  };
+
+/**
+ * Get all currently loaded members from the current
+ * room state.
+ * @returns {RoomMember[]} Room members
+ */
+Room.prototype.getMembers = function() {
+    return this.currentState.getMembers();
+};
 
 /**
  * Get a list of members whose membership state is "join".
  * @return {RoomMember[]} A list of currently joined members.
  */
  Room.prototype.getJoinedMembers = function() {
-    return this.getMembersWithMembership("join");
+     return this.getMembersWithMembership("join");
  };
 
 /**
@@ -861,7 +1077,7 @@ Room.prototype.getInvitedAndJoinedMemberCount = function() {
  * @return {RoomMember[]} A list of members with the given membership state.
  */
  Room.prototype.getMembersWithMembership = function(membership) {
-    return utils.filter(this.currentState.getMembers(), function(m) {
+    return this.currentState.getMembers().filter(function(m) {
         return m.membership === membership;
     });
  };
@@ -985,18 +1201,30 @@ Room.prototype.removeFilteredTimelineSet = function(filter) {
  *
  * @param {MatrixEvent} event Event to be added
  * @param {string?} duplicateStrategy 'ignore' or 'replace'
+ * @param {boolean} fromCache whether the sync response came from cache
  * @fires module:client~MatrixClient#event:"Room.timeline"
  * @private
  */
-Room.prototype._addLiveEvent = function(event, duplicateStrategy) {
-    let i;
-    if (event.getType() === "m.room.redaction") {
+Room.prototype._addLiveEvent = function(event, duplicateStrategy, fromCache) {
+    if (event.isRedaction()) {
         const redactId = event.event.redacts;
 
         // if we know about this event, redact its contents now.
         const redactedEvent = this.getUnfilteredTimelineSet().findEventById(redactId);
         if (redactedEvent) {
             redactedEvent.makeRedacted(event);
+
+            // If this is in the current state, replace it with the redacted version
+            if (redactedEvent.getStateKey()) {
+                const currentStateEvent = this.currentState.getStateEvents(
+                    redactedEvent.getType(),
+                    redactedEvent.getStateKey(),
+                );
+                if (currentStateEvent.getId() === redactedEvent.getId()) {
+                    this.currentState.setStateEvents([redactedEvent]);
+                }
+            }
+
             this.emit("Room.redaction", event, this);
 
             // TODO: we stash user displaynames (among other things) in
@@ -1023,8 +1251,8 @@ Room.prototype._addLiveEvent = function(event, duplicateStrategy) {
     }
 
     // add to our timeline sets
-    for (i = 0; i < this._timelineSets.length; i++) {
-        this._timelineSets[i].addLiveEvent(event, duplicateStrategy);
+    for (let i = 0; i < this._timelineSets.length; i++) {
+        this._timelineSets[i].addLiveEvent(event, duplicateStrategy, fromCache);
     }
 
     // synthesize and inject implicit read receipts
@@ -1064,7 +1292,7 @@ Room.prototype._addLiveEvent = function(event, duplicateStrategy) {
  * unique transaction id.
  */
 Room.prototype.addPendingEvent = function(event, txnId) {
-    if (event.status !== EventStatus.SENDING) {
+    if (event.status !== EventStatus.SENDING && event.status !== EventStatus.NOT_SENT) {
         throw new Error("addPendingEvent called on an event with status " +
                         event.status);
     }
@@ -1087,15 +1315,35 @@ Room.prototype.addPendingEvent = function(event, txnId) {
 
     if (this._opts.pendingEventOrdering == "detached") {
         if (this._pendingEventList.some((e) => e.status === EventStatus.NOT_SENT)) {
-            console.warn("Setting event as NOT_SENT due to messages in the same state");
-            event.status = EventStatus.NOT_SENT;
+            logger.warn("Setting event as NOT_SENT due to messages in the same state");
+            event.setStatus(EventStatus.NOT_SENT);
         }
         this._pendingEventList.push(event);
+        this._savePendingEvents();
+        if (event.isRelation()) {
+            // For pending events, add them to the relations collection immediately.
+            // (The alternate case below already covers this as part of adding to
+            // the timeline set.)
+            this._aggregateNonLiveRelation(event);
+        }
+
+        if (event.isRedaction()) {
+            const redactId = event.event.redacts;
+            let redactedEvent = this._pendingEventList &&
+                this._pendingEventList.find(e => e.getId() === redactId);
+            if (!redactedEvent) {
+                redactedEvent = this.getUnfilteredTimelineSet().findEventById(redactId);
+            }
+            if (redactedEvent) {
+                redactedEvent.markLocallyRedacted(event);
+                this.emit("Room.redaction", event, this);
+            }
+        }
     } else {
         for (let i = 0; i < this._timelineSets.length; i++) {
             const timelineSet = this._timelineSets[i];
             if (timelineSet.getFilter()) {
-                if (this._filter.filterRoomTimeline([event]).length) {
+                if (timelineSet.getFilter().filterRoomTimeline([event]).length) {
                     timelineSet.addEventToTimeline(event,
                         timelineSet.getLiveTimeline(), false);
                 }
@@ -1107,6 +1355,70 @@ Room.prototype.addPendingEvent = function(event, txnId) {
     }
 
     this.emit("Room.localEchoUpdated", event, this, null, null);
+};
+
+/**
+ * Persists all pending events to local storage
+ *
+ * If the current room is encrypted only encrypted events will be persisted
+ * all messages that are not yet encrypted will be discarded
+ *
+ * This is because the flow of EVENT_STATUS transition is
+ * queued => sending => encrypting => sending => sent
+ *
+ * Steps 3 and 4 are skipped for unencrypted room.
+ * It is better to discard an unencrypted message rather than persisting
+ * it locally for everyone to read
+ */
+Room.prototype._savePendingEvents = function() {
+    if (this._pendingEventList) {
+        const pendingEvents = this._pendingEventList.map(event => {
+            return {
+                ...event.event,
+                txn_id: event.getTxnId(),
+            };
+        }).filter(event => {
+            // Filter out the unencrypted messages if the room is encrypted
+            const isEventEncrypted = event.type === "m.room.encrypted";
+            const isRoomEncrypted = this._client.isRoomEncrypted(this.roomId);
+            return isEventEncrypted || !isRoomEncrypted;
+        });
+
+        const { store } = this._client._sessionStore;
+        if (this._pendingEventList.length > 0) {
+            store.setItem(
+                pendingEventsKey(this.roomId),
+                JSON.stringify(pendingEvents),
+            );
+        } else {
+            store.removeItem(pendingEventsKey(this.roomId));
+        }
+    }
+};
+
+/**
+ * Used to aggregate the local echo for a relation, and also
+ * for re-applying a relation after it's redaction has been cancelled,
+ * as the local echo for the redaction of the relation would have
+ * un-aggregated the relation. Note that this is different from regular messages,
+ * which are just kept detached for their local echo.
+ *
+ * Also note that live events are aggregated in the live EventTimelineSet.
+ * @param {module:models/event.MatrixEvent} event the relation event that needs to be aggregated.
+ */
+Room.prototype._aggregateNonLiveRelation = function(event) {
+    // TODO: We should consider whether this means it would be a better
+    // design to lift the relations handling up to the room instead.
+    for (let i = 0; i < this._timelineSets.length; i++) {
+        const timelineSet = this._timelineSets[i];
+        if (timelineSet.getFilter()) {
+            if (timelineSet.getFilter().filterRoomTimeline([event]).length) {
+                timelineSet.aggregateRelations(event);
+            }
+        } else {
+            timelineSet.aggregateRelations(event);
+        }
+    }
 };
 
 /**
@@ -1128,17 +1440,17 @@ Room.prototype._handleRemoteEcho = function(remoteEvent, localEvent) {
     const newEventId = remoteEvent.getId();
     const oldStatus = localEvent.status;
 
+    logger.debug(
+        `Got remote echo for event ${oldEventId} -> ${newEventId} ` +
+        `old status ${oldStatus}`,
+    );
+
     // no longer pending
-    delete this._txnToEvent[remoteEvent.transaction_id];
+    delete this._txnToEvent[remoteEvent.getUnsigned().transaction_id];
 
     // if it's in the pending list, remove it
     if (this._pendingEventList) {
-        utils.removeElement(
-            this._pendingEventList,
-            function(ev) {
-                return ev.getId() == oldEventId;
-            }, false,
-        );
+        this.removePendingEvent(oldEventId);
     }
 
     // replace the event source (this will preserve the plaintext payload if
@@ -1197,7 +1509,10 @@ ALLOWED_TRANSITIONS[EventStatus.CANCELLED] =
  * @fires module:client~MatrixClient#event:"Room.localEchoUpdated"
  */
 Room.prototype.updatePendingEvent = function(event, newStatus, newEventId) {
-    console.log(`setting pendingEvent status to ${newStatus} in ${event.getRoomId()}`);
+    logger.log(
+        `setting pendingEvent status to ${newStatus} in ${event.getRoomId()} ` +
+        `event ID ${event.getId()} -> ${newEventId}`,
+    );
 
     // if the message was sent, we expect an event id
     if (newStatus == EventStatus.SENT && !newEventId) {
@@ -1229,11 +1544,11 @@ Room.prototype.updatePendingEvent = function(event, newStatus, newEventId) {
                         newStatus);
     }
 
-    event.status = newStatus;
+    event.setStatus(newStatus);
 
     if (newStatus == EventStatus.SENT) {
         // update the event id
-        event.event.event_id = newEventId;
+        event.replaceLocalEventId(newEventId);
 
         // if the event was already in the timeline (which will be the case if
         // opts.pendingEventOrdering==chronological), we need to update the
@@ -1244,19 +1559,38 @@ Room.prototype.updatePendingEvent = function(event, newStatus, newEventId) {
     } else if (newStatus == EventStatus.CANCELLED) {
         // remove it from the pending event list, or the timeline.
         if (this._pendingEventList) {
-            utils.removeElement(
-                this._pendingEventList,
-                function(ev) {
-                    return ev.getId() == oldEventId;
-                }, false,
-            );
+            const idx = this._pendingEventList.findIndex(ev => ev.getId() === oldEventId);
+            if (idx !== -1) {
+                const [removedEvent] = this._pendingEventList.splice(idx, 1);
+                if (removedEvent.isRedaction()) {
+                    this._revertRedactionLocalEcho(removedEvent);
+                }
+            }
         }
         this.removeEvent(oldEventId);
     }
+    this._savePendingEvents();
 
     this.emit("Room.localEchoUpdated", event, this, oldEventId, oldStatus);
 };
 
+Room.prototype._revertRedactionLocalEcho = function(redactionEvent) {
+    const redactId = redactionEvent.event.redacts;
+    if (!redactId) {
+        return;
+    }
+    const redactedEvent = this.getUnfilteredTimelineSet()
+        .findEventById(redactId);
+    if (redactedEvent) {
+        redactedEvent.unmarkLocallyRedacted();
+        // re-render after undoing redaction
+        this.emit("Room.redactionCancelled", redactionEvent, this);
+        // reapply relation now redaction failed
+        if (redactedEvent.isRelation()) {
+            this._aggregateNonLiveRelation(redactedEvent);
+        }
+    }
+};
 
 /**
  * Add some events to this room. This can include state events, message
@@ -1272,9 +1606,10 @@ Room.prototype.updatePendingEvent = function(event, newStatus, newEventId) {
  * this function will be ignored entirely, preserving the existing event in the
  * timeline. Events are identical based on their event ID <b>only</b>.
  *
+ * @param {boolean} fromCache whether the sync response came from cache
  * @throws If <code>duplicateStrategy</code> is not falsey, 'replace' or 'ignore'.
  */
-Room.prototype.addLiveEvents = function(events, duplicateStrategy) {
+Room.prototype.addLiveEvents = function(events, duplicateStrategy, fromCache) {
     let i;
     if (duplicateStrategy && ["replace", "ignore"].indexOf(duplicateStrategy) === -1) {
         throw new Error("duplicateStrategy MUST be either 'replace' or 'ignore'");
@@ -1298,28 +1633,33 @@ Room.prototype.addLiveEvents = function(events, duplicateStrategy) {
     }
 
     for (i = 0; i < events.length; i++) {
-        if (events[i].getType() === "m.typing") {
-            this.currentState.setTypingEvent(events[i]);
-        } else if (events[i].getType() === "m.receipt") {
-            this.addReceipt(events[i]);
-        }
-        // N.B. account_data is added directly by /sync to avoid
-        // having to maintain an event.isAccountData() here
-        else {
-            // TODO: We should have a filter to say "only add state event
-            // types X Y Z to the timeline".
-            this._addLiveEvent(events[i], duplicateStrategy);
-        }
+        // TODO: We should have a filter to say "only add state event
+        // types X Y Z to the timeline".
+        this._addLiveEvent(events[i], duplicateStrategy, fromCache);
+    }
+};
+
+/**
+ * Adds/handles ephemeral events such as typing notifications and read receipts.
+ * @param {MatrixEvent[]} events A list of events to process
+ */
+Room.prototype.addEphemeralEvents = function(events) {
+    for (const event of events) {
+        if (event.getType() === 'm.typing') {
+            this.currentState.setTypingEvent(event);
+        } else if (event.getType() === 'm.receipt') {
+            this.addReceipt(event);
+        } // else ignore - life is too short for us to care about these events
     }
 };
 
 /**
  * Removes events from this room.
- * @param {String[]} event_ids A list of event_ids to remove.
+ * @param {String[]} eventIds A list of eventIds to remove.
  */
-Room.prototype.removeEvents = function(event_ids) {
-    for (let i = 0; i < event_ids.length; ++i) {
-        this.removeEvent(event_ids[i]);
+Room.prototype.removeEvents = function(eventIds) {
+    for (let i = 0; i < eventIds.length; ++i) {
+        this.removeEvent(eventIds[i]);
     }
 };
 
@@ -1335,6 +1675,9 @@ Room.prototype.removeEvent = function(eventId) {
     for (let i = 0; i < this._timelineSets.length; i++) {
         const removed = this._timelineSets[i].removeEvent(eventId);
         if (removed) {
+            if (removed.isRedaction()) {
+                this._revertRedactionLocalEcho(removed);
+            }
             removedAny = true;
         }
     }
@@ -1357,7 +1700,7 @@ Room.prototype.recalculate = function() {
     );
     if (membershipEvent && membershipEvent.getContent().membership === "invite") {
         const strippedStateEvents = membershipEvent.event.invite_room_state || [];
-        utils.forEach(strippedStateEvents, function(strippedEvent) {
+        strippedStateEvents.forEach(function(strippedEvent) {
             const existingEvent = self.currentState.getStateEvents(
                 strippedEvent.type, strippedEvent.state_key,
             );
@@ -1507,9 +1850,9 @@ Room.prototype.addReceipt = function(event, fake) {
  */
 Room.prototype._addReceiptsToStructure = function(event, receipts) {
     const self = this;
-    utils.keys(event.getContent()).forEach(function(eventId) {
-        utils.keys(event.getContent()[eventId]).forEach(function(receiptType) {
-            utils.keys(event.getContent()[eventId][receiptType]).forEach(
+    Object.keys(event.getContent()).forEach(function(eventId) {
+        Object.keys(event.getContent()[eventId]).forEach(function(receiptType) {
+            Object.keys(event.getContent()[eventId][receiptType]).forEach(
             function(userId) {
                 const receipt = event.getContent()[eventId][receiptType][userId];
 
@@ -1549,8 +1892,8 @@ Room.prototype._addReceiptsToStructure = function(event, receipts) {
  */
 Room.prototype._buildReceiptCache = function(receipts) {
     const receiptCacheByEventId = {};
-    utils.keys(receipts).forEach(function(receiptType) {
-        utils.keys(receipts[receiptType]).forEach(function(userId) {
+    Object.keys(receipts).forEach(function(receiptType) {
+        Object.keys(receipts[receiptType]).forEach(function(userId) {
             const receipt = receipts[receiptType][userId];
             if (!receiptCacheByEventId[receipt.eventId]) {
                 receiptCacheByEventId[receipt.eventId] = [];
@@ -1608,8 +1951,9 @@ Room.prototype.addAccountData = function(events) {
         if (event.getType() === "m.tag") {
             this.addTags(event);
         }
+        const lastEvent = this.accountData[event.getType()];
         this.accountData[event.getType()] = event;
-        this.emit("Room.accountData", event, this);
+        this.emit("Room.accountData", event, this, lastEvent);
     }
 };
 
@@ -1624,13 +1968,58 @@ Room.prototype.getAccountData = function(type) {
 
 
 /**
- * Returns wheter the syncing user has permission to send a message in the room
+ * Returns whether the syncing user has permission to send a message in the room
  * @return {boolean} true if the user should be permitted to send
  *                   message events into the room.
  */
 Room.prototype.maySendMessage = function() {
     return this.getMyMembership() === 'join' &&
         this.currentState.maySendEvent('m.room.message', this.myUserId);
+};
+
+/**
+ * Returns whether the given user has permissions to issue an invite for this room.
+ * @param {string} userId the ID of the Matrix user to check permissions for
+ * @returns {boolean} true if the user should be permitted to issue invites for this room.
+ */
+Room.prototype.canInvite = function(userId) {
+    let canInvite = this.getMyMembership() === "join";
+    const powerLevelsEvent = this.currentState.getStateEvents(EventType.RoomPowerLevels, "");
+    const powerLevels = powerLevelsEvent && powerLevelsEvent.getContent();
+    const me = this.getMember(userId);
+    if (powerLevels && me && powerLevels.invite > me.powerLevel) {
+        canInvite = false;
+    }
+    return canInvite;
+};
+
+/**
+ * Returns the join rule based on the m.room.join_rule state event, defaulting to `invite`.
+ * @returns {string} the join_rule applied to this room
+ */
+Room.prototype.getJoinRule = function() {
+    return this.currentState.getJoinRule();
+};
+
+/**
+ * Returns the type of the room from the `m.room.create` event content or undefined if none is set
+ * @returns {?string} the type of the room. Currently only RoomType.Space is known.
+ */
+Room.prototype.getType = function() {
+    const createEvent = this.currentState.getStateEvents("m.room.create", "");
+    if (!createEvent) {
+        logger.warn("[getType] Room " + this.roomId + " does not have an m.room.create event");
+        return undefined;
+    }
+    return createEvent.getContent()[RoomCreateTypeField];
+};
+
+/**
+ * Returns whether the room is a space-room as defined by MSC1772.
+ * @returns {boolean} true if the room's type is RoomType.Space
+ */
+Room.prototype.isSpaceRoom = function() {
+    return this.getType() === RoomType.Space;
 };
 
 /**
@@ -1656,7 +2045,7 @@ function calculateRoomName(room, userId, ignoreRoomNameEvent) {
     let alias = room.getCanonicalAlias();
 
     if (!alias) {
-        const aliases = room.getAliases();
+        const aliases = room.getAltAliases();
 
         if (aliases.length) {
             alias = aliases[0];
@@ -1714,14 +2103,14 @@ function calculateRoomName(room, userId, ignoreRoomNameEvent) {
     // let's try to figure out who was here before
     let leftNames = otherNames;
     // if we didn't have heroes, try finding them in the room state
-    if(!leftNames.length) {
+    if (!leftNames.length) {
         leftNames = room.currentState.getMembers().filter((m) => {
             return m.userId !== userId &&
                 m.membership !== "invite" &&
                 m.membership !== "join";
         }).map((m) => m.name);
     }
-    if(leftNames.length) {
+    if (leftNames.length) {
         return `Empty room (was ${memberNamesToRoomName(leftNames)})`;
     } else {
         return "Empty room";
@@ -1747,19 +2136,25 @@ function memberNamesToRoomName(names, count = (names.length + 1)) {
 }
 
 /**
- * The Room class.
- */
-module.exports = Room;
-
-/**
  * Fires when an event we had previously received is redacted.
  *
  * (Note this is *not* fired when the redaction happens before we receive the
  * event).
  *
  * @event module:client~MatrixClient#"Room.redaction"
- * @param {MatrixEvent} event The matrix event which was redacted
+ * @param {MatrixEvent} event The matrix redaction event
  * @param {Room} room The room containing the redacted event
+ */
+
+/**
+ * Fires when an event that was previously redacted isn't anymore.
+ * This happens when the redaction couldn't be sent and
+ * was subsequently cancelled by the user. Redactions have a local echo
+ * which is undone in this scenario.
+ *
+ * @event module:client~MatrixClient#"Room.redactionCancelled"
+ * @param {MatrixEvent} event The matrix redaction event that was cancelled.
+ * @param {Room} room The room containing the unredacted event
  */
 
 /**
@@ -1800,8 +2195,10 @@ module.exports = Room;
  * @event module:client~MatrixClient#"Room.accountData"
  * @param {event} event The account_data event
  * @param {Room} room The room whose account_data was updated.
+ * @param {MatrixEvent} prevEvent The event being replaced by
+ * the new account data, if known.
  * @example
- * matrixClient.on("Room.accountData", function(event, room){
+ * matrixClient.on("Room.accountData", function(event, room, oldEvent){
  *   if (event.getType() === "m.room.colorscheme") {
  *       applyColorScheme(event.getContents());
  *   }
@@ -1841,4 +2238,13 @@ module.exports = Room;
  *    except when updating a successfully-sent event when its echo arrives)
  *
  * @param {EventStatus} oldStatus The previous event status.
+ */
+
+/**
+ * Fires when the logged in user's membership in the room is updated.
+ *
+ * @event module:models/room~Room#"Room.myMembership"
+ * @param {Room} room The room in which the membership has been updated
+ * @param {string} membership The new membership value
+ * @param {string} prevMembership The previous membership value
  */

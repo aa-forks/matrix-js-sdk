@@ -1,6 +1,7 @@
 /*
 Copyright 2017 Vector Creations Ltd
 Copyright 2018 New Vector Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,11 +16,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import expect from 'expect';
-import Promise from 'bluebird';
-
-import TestClient from '../TestClient';
-import testUtils from '../test-utils';
+import {TestClient} from '../TestClient';
+import * as testUtils from '../test-utils';
+import {logger} from '../../src/logger';
 
 const ROOM_ID = "!room:id";
 
@@ -71,7 +70,7 @@ function getSyncResponse(roomMembers) {
 
 describe("DeviceList management:", function() {
     if (!global.Olm) {
-        console.warn('not running deviceList tests: Olm not present');
+        logger.warn('not running deviceList tests: Olm not present');
         return;
     }
 
@@ -87,8 +86,6 @@ describe("DeviceList management:", function() {
     }
 
     beforeEach(async function() {
-        testUtils.beforeEach(this); // eslint-disable-line no-invalid-this
-
         // we create our own sessionStoreBackend so that we can use it for
         // another TestClient.
         sessionStoreBackend = new testUtils.MockStorageApi();
@@ -108,7 +105,7 @@ describe("DeviceList management:", function() {
 
             return aliceTestClient.flushSync();
         }).then(function() {
-            console.log("Forcing alice to download our device keys");
+            logger.log("Forcing alice to download our device keys");
 
             aliceTestClient.httpBackend.when('POST', '/keys/query').respond(200, {
                 device_keys: {
@@ -121,7 +118,7 @@ describe("DeviceList management:", function() {
                 aliceTestClient.httpBackend.flush('/keys/query', 1),
             ]);
         }).then(function() {
-            console.log("Telling alice to send a megolm message");
+            logger.log("Telling alice to send a megolm message");
 
             aliceTestClient.httpBackend.when(
                 'PUT', '/send/',
@@ -143,7 +140,7 @@ describe("DeviceList management:", function() {
 
     it("We should not get confused by out-of-order device query responses",
        () => {
-           // https://github.com/vector-im/riot-web/issues/3126
+           // https://github.com/vector-im/element-web/issues/3126
            aliceTestClient.expectKeyQuery({device_keys: {'@alice:localhost': {}}});
            return aliceTestClient.start().then(() => {
                aliceTestClient.httpBackend.when('GET', '/sync').respond(
@@ -274,7 +271,7 @@ describe("DeviceList management:", function() {
            });
        }).timeout(3000);
 
-    // https://github.com/vector-im/riot-web/issues/4983
+    // https://github.com/vector-im/element-web/issues/4983
     describe("Alice should know she has stale device lists", () => {
         beforeEach(async function() {
             await aliceTestClient.start();

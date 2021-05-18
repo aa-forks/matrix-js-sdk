@@ -1,5 +1,3 @@
-"use strict";
-
 var myUserId = "@example:localhost";
 var myAccessToken = "QGV4YW1wbGU6bG9jYWxob3N0.qPEvLuYfNBjxikiCjP";
 var sdk = require("matrix-js-sdk");
@@ -56,7 +54,7 @@ rl.on('line', function(line) {
                 }
             }
             if (notSentEvent) {
-                matrixClient.resendEvent(notSentEvent, viewingRoom).done(function() {
+                matrixClient.resendEvent(notSentEvent, viewingRoom).then(function() {
                     printMessages();
                     rl.prompt();
                 }, function(err) {
@@ -70,7 +68,7 @@ rl.on('line', function(line) {
         }
         else if (line.indexOf("/more ") === 0) {
             var amount = parseInt(line.split(" ")[1]) || 20;
-            matrixClient.scrollback(viewingRoom, amount).done(function(room) {
+            matrixClient.scrollback(viewingRoom, amount).then(function(room) {
                 printMessages();
                 rl.prompt();
             }, function(err) {
@@ -79,7 +77,7 @@ rl.on('line', function(line) {
         }
         else if (line.indexOf("/invite ") === 0) {
             var userId = line.split(" ")[1].trim();
-            matrixClient.invite(viewingRoom.roomId, userId).done(function() {
+            matrixClient.invite(viewingRoom.roomId, userId).then(function() {
                 printMessages();
                 rl.prompt();
             }, function(err) {
@@ -92,7 +90,7 @@ rl.on('line', function(line) {
             matrixClient.uploadContent({
                 stream: stream,
                 name: filename
-            }).done(function(url) {
+            }).then(function(url) {
                 var content = {
                     msgtype: "m.file",
                     body: filename,
@@ -116,7 +114,7 @@ rl.on('line', function(line) {
             viewingRoom = roomList[roomIndex];
             if (viewingRoom.getMember(myUserId).membership === "invite") {
                 // join the room first
-                matrixClient.joinRoom(viewingRoom.roomId).done(function(room) {
+                matrixClient.joinRoom(viewingRoom.roomId).then(function(room) {
                     setRoomList();
                     viewingRoom = room;
                     printMessages();
@@ -128,7 +126,7 @@ rl.on('line', function(line) {
             else {
                 printMessages();
             }
-        } 
+        }
     }
     rl.prompt();
 });
@@ -281,8 +279,8 @@ function printMemberList(room) {
             member.membership + new Array(10 - member.membership.length).join(" ")
         );
         print(
-            "%s"+fmt(" :: ")+"%s"+fmt(" (")+"%s"+fmt(")"), 
-            membershipWithPadding, member.name, 
+            "%s"+fmt(" :: ")+"%s"+fmt(" (")+"%s"+fmt(")"),
+            membershipWithPadding, member.name,
             (member.userId === myUserId ? "Me" : member.userId),
             fmt
         );
@@ -290,26 +288,27 @@ function printMemberList(room) {
 }
 
 function printRoomInfo(room) {
-    var eventDict = room.currentState.events;
+    var eventMap = room.currentState.events;
     var eTypeHeader = "    Event Type(state_key)    ";
     var sendHeader = "        Sender        ";
     // pad content to 100
     var restCount = (
-        100 - "Content".length - " | ".length - " | ".length - 
+        100 - "Content".length - " | ".length - " | ".length -
         eTypeHeader.length - sendHeader.length
     );
     var padSide = new Array(Math.floor(restCount/2)).join(" ");
     var contentHeader = padSide + "Content" + padSide;
     print(eTypeHeader+sendHeader+contentHeader);
     print(new Array(100).join("-"));
-    Object.keys(eventDict).forEach(function(eventType) {
+    eventMap.keys().forEach(function(eventType) {
         if (eventType === "m.room.member") { return; } // use /members instead.
-        Object.keys(eventDict[eventType]).forEach(function(stateKey) {
+        var eventEventMap = eventMap.get(eventType);
+        eventEventMap.keys().forEach(function(stateKey) {
             var typeAndKey = eventType + (
                 stateKey.length > 0 ? "("+stateKey+")" : ""
             );
             var typeStr = fixWidth(typeAndKey, eTypeHeader.length);
-            var event = eventDict[eventType][stateKey];
+            var event = eventEventMap.get(stateKey);
             var sendStr = fixWidth(event.getSender(), sendHeader.length);
             var contentStr = fixWidth(
                 JSON.stringify(event.getContent()), contentHeader.length

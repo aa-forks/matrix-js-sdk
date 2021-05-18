@@ -1,15 +1,6 @@
-"use strict";
-import 'source-map-support/register';
-const utils = require("../../lib/utils");
-const testUtils = require("../test-utils");
-
-import expect from 'expect';
+import * as utils from "../../src/utils";
 
 describe("utils", function() {
-    beforeEach(function() {
-        testUtils.beforeEach(this); // eslint-disable-line no-invalid-this
-    });
-
     describe("encodeParams", function() {
         it("should url encode and concat with &s", function() {
             const params = {
@@ -32,40 +23,6 @@ describe("utils", function() {
             expect(utils.encodeUri(path, vals)).toEqual(
                 "foo/bar/baz/beer%40",
             );
-        });
-    });
-
-    describe("forEach", function() {
-        it("should be invoked for each element", function() {
-            const arr = [];
-            utils.forEach([55, 66, 77], function(element) {
-                arr.push(element);
-            });
-            expect(arr).toEqual([55, 66, 77]);
-        });
-    });
-
-    describe("findElement", function() {
-        it("should find only 1 element if there is a match", function() {
-            const matchFn = function() {
-                return true;
-            };
-            const arr = [55, 66, 77];
-            expect(utils.findElement(arr, matchFn)).toEqual(55);
-        });
-        it("should be able to find in reverse order", function() {
-            const matchFn = function() {
-                return true;
-            };
-            const arr = [55, 66, 77];
-            expect(utils.findElement(arr, matchFn, true)).toEqual(77);
-        });
-        it("should find nothing if the function never returns true", function() {
-            const matchFn = function() {
-                return false;
-            };
-            const arr = [55, 66, 77];
-            expect(utils.findElement(arr, matchFn)).toBeFalsy();
         });
     });
 
@@ -112,20 +69,6 @@ describe("utils", function() {
         });
     });
 
-    describe("isArray", function() {
-        it("should return true for arrays", function() {
-            expect(utils.isArray([])).toBe(true);
-            expect(utils.isArray([5, 3, 7])).toBe(true);
-
-            expect(utils.isArray()).toBe(false);
-            expect(utils.isArray(null)).toBe(false);
-            expect(utils.isArray({})).toBe(false);
-            expect(utils.isArray("foo")).toBe(false);
-            expect(utils.isArray(555)).toBe(false);
-            expect(utils.isArray(function() {})).toBe(false);
-        });
-    });
-
     describe("checkObjectHasKeys", function() {
         it("should throw for missing keys", function() {
             expect(function() {
@@ -135,7 +78,7 @@ describe("utils", function() {
                 utils.checkObjectHasKeys({
                     foo: "bar",
                 }, ["foo"]);
-            }).toNotThrow();
+            }).not.toThrow();
         });
     });
 
@@ -152,7 +95,7 @@ describe("utils", function() {
                 utils.checkObjectHasNoAdditionalKeys({
                             foo: "bar",
                         }, ["foo"]);
-            }).toNotThrow();
+            }).not.toThrow();
         });
     });
 
@@ -289,6 +232,32 @@ describe("utils", function() {
             utils.extend(target, source);
             expect(target.enumerableProp).toBe(true);
             expect(target.nonenumerableProp).toBe(undefined);
+        });
+    });
+
+    describe("chunkPromises", function() {
+        it("should execute promises in chunks", async function() {
+            let promiseCount = 0;
+
+            function fn1() {
+                return new Promise(async function(resolve, reject) {
+                    await utils.sleep(1);
+                    expect(promiseCount).toEqual(0);
+                    ++promiseCount;
+                    resolve();
+                });
+            }
+
+            function fn2() {
+                return new Promise(function(resolve, reject) {
+                    expect(promiseCount).toEqual(1);
+                    ++promiseCount;
+                    resolve();
+                });
+            }
+
+            await utils.chunkPromises([fn1, fn2], 1);
+            expect(promiseCount).toEqual(2);
         });
     });
 });

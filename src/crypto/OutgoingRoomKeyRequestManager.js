@@ -14,10 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import Promise from 'bluebird';
-
-import logger from '../logger';
-import utils from '../utils';
+import {logger} from '../logger';
 
 /**
  * Internal module. Management of outgoing room key requests.
@@ -60,7 +57,7 @@ const SEND_KEY_REQUESTS_DELAY_MS = 500;
  *
  * @enum {number}
  */
-const ROOM_KEY_REQUEST_STATES = {
+export const ROOM_KEY_REQUEST_STATES = {
     /** request not yet sent */
     UNSENT: 0,
 
@@ -77,7 +74,7 @@ const ROOM_KEY_REQUEST_STATES = {
     CANCELLATION_PENDING_AND_WILL_RESEND: 3,
 };
 
-export default class OutgoingRoomKeyRequestManager {
+export class OutgoingRoomKeyRequestManager {
     constructor(baseApis, deviceId, cryptoStore) {
         this._baseApis = baseApis;
         this._deviceId = deviceId;
@@ -99,10 +96,6 @@ export default class OutgoingRoomKeyRequestManager {
      */
     start() {
         this._clientRunning = true;
-
-        // set the timer going, to handle any requests which didn't get sent
-        // on the previous run of the client.
-        this._startTimer();
     }
 
     /**
@@ -115,7 +108,14 @@ export default class OutgoingRoomKeyRequestManager {
     }
 
     /**
-     * Send off a room key request, if we haven't already done so.
+     * Send any requests that have been queued
+     */
+    sendQueuedRequests() {
+        this._startTimer();
+    }
+
+    /**
+     * Queue up a room key request, if we haven't already queued or sent one.
      *
      * The `requestBody` is compared (with a deep-equality check) against
      * previous queued or sent requests and if it matches, no change is made.
@@ -131,7 +131,7 @@ export default class OutgoingRoomKeyRequestManager {
      *    pending list (or we have established that a similar request already
      *    exists)
      */
-    async sendRoomKeyRequest(requestBody, recipients, resend=false) {
+    async queueRoomKeyRequest(requestBody, recipients, resend=false) {
         const req = await this._cryptoStore.getOutgoingRoomKeyRequest(
             requestBody,
         );
@@ -186,7 +186,7 @@ export default class OutgoingRoomKeyRequestManager {
                         // in state ROOM_KEY_REQUEST_STATES.SENT, so we must have
                         // raced with another tab to mark the request cancelled.
                         // Try again, to make sure the request is resent.
-                        return await this.sendRoomKeyRequest(
+                        return await this.queueRoomKeyRequest(
                             requestBody, recipients, resend,
                         );
                     }
@@ -222,9 +222,6 @@ export default class OutgoingRoomKeyRequestManager {
                 throw new Error('unhandled state: ' + req.state);
             }
         }
-        // some of the branches require the timer to be started.  Just start it
-        // all the time, because it doesn't hurt to start it.
-        this._startTimer();
     }
 
     /**
@@ -329,6 +326,21 @@ export default class OutgoingRoomKeyRequestManager {
         );
     }
 
+    /**
+     * Find anything in `sent` state, and kick it around the loop again.
+     * This is intended for situations where something substantial has changed, and we
+     * don't really expect the other end to even care about the cancellation.
+     * For example, after initialization or self-verification.
+     * @return {Promise} An array of `queueRoomKeyRequest` outputs.
+     */
+    async cancelAndResendAllOutgoingRequests() {
+        const outgoings = await this._cryptoStore.getAllOutgoingRoomKeyRequestsByState(
+            ROOM_KEY_REQUEST_STATES.SENT,
+        );
+        return Promise.all(outgoings.map(({ requestBody, recipients }) =>
+            this.queueRoomKeyRequest(requestBody, recipients, true)));
+    }
+
     // start the background timer to send queued requests, if the timer isn't
     // already running
     _startTimer() {
@@ -368,15 +380,12 @@ export default class OutgoingRoomKeyRequestManager {
             return Promise.resolve();
         }
 
-        logger.log("Looking for queued outgoing room key requests");
-
         return this._cryptoStore.getOutgoingRoomKeyRequestByState([
             ROOM_KEY_REQUEST_STATES.CANCELLATION_PENDING,
             ROOM_KEY_REQUEST_STATES.CANCELLATION_PENDING_AND_WILL_RESEND,
             ROOM_KEY_REQUEST_STATES.UNSENT,
         ]).then((req) => {
             if (!req) {
-                logger.log("No more outgoing room key requests");
                 this._sendOutgoingRoomKeyRequestsTimer = null;
                 return;
             }
@@ -400,7 +409,6 @@ export default class OutgoingRoomKeyRequestManager {
             }).catch((e) => {
                 logger.error("Error sending room key request; will retry later.", e);
                 this._sendOutgoingRoomKeyRequestsTimer = null;
-                this._startTimer();
             });
         });
     }
@@ -487,7 +495,7 @@ function stringifyRequestBody(requestBody) {
 
 function stringifyRecipientList(recipients) {
     return '['
-        + utils.map(recipients, (r) => `${r.userId}:${r.deviceId}`).join(",")
+        + recipients.map((r) => `${r.userId}:${r.deviceId}`).join(",")
         + ']';
 }
 

@@ -1,5 +1,6 @@
 /*
 Copyright 2015, 2016 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,14 +14,16 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
  * @module models/room-state
  */
-const EventEmitter = require("events").EventEmitter;
 
-const utils = require("../utils");
-const RoomMember = require("./room-member");
+import {EventEmitter} from "events";
+import {RoomMember} from "./room-member";
+import {logger} from '../logger';
+import * as utils from "../utils";
+import {EventType} from "../@types/event";
 
 // possible statuses for out-of-band member loading
 const OOB_STATUS_NOTSTARTED = 1;
@@ -61,14 +64,12 @@ const OOB_STATUS_FINISHED = 3;
  * events dictionary, keyed on the event type and then the state_key value.
  * @prop {string} paginationToken The pagination token for this state.
  */
-function RoomState(roomId, oobMemberFlags = undefined) {
+export function RoomState(roomId, oobMemberFlags = undefined) {
     this.roomId = roomId;
     this.members = {
         // userId: RoomMember
     };
-    this.events = {
-        // eventType: { stateKey: MatrixEvent }
-    };
+    this.events = new Map(); // Map<eventType, Map<stateKey, MatrixEvent>>
     this.paginationToken = null;
 
     this._sentinels = {
@@ -153,7 +154,7 @@ RoomState.prototype.setInvitedMemberCount = function(count) {
  * @return {Array<RoomMember>} A list of RoomMembers.
  */
 RoomState.prototype.getMembers = function() {
-    return utils.values(this.members);
+    return Object.values(this.members);
 };
 
 /**
@@ -162,7 +163,7 @@ RoomState.prototype.getMembers = function() {
  * @return {Array<RoomMember>} A list of RoomMembers.
  */
 RoomState.prototype.getMembersExcept = function(excludedIds) {
-    return utils.values(this.members)
+    return Object.values(this.members)
         .filter((m) => !excludedIds.includes(m.userId));
 };
 
@@ -209,14 +210,14 @@ RoomState.prototype.getSentinelMember = function(userId) {
  * <code>undefined</code>, else a single event (or null if no match found).
  */
 RoomState.prototype.getStateEvents = function(eventType, stateKey) {
-    if (!this.events[eventType]) {
+    if (!this.events.has(eventType)) {
         // no match
         return stateKey === undefined ? [] : null;
     }
     if (stateKey === undefined) { // return all values
-        return utils.values(this.events[eventType]);
+        return Array.from(this.events.get(eventType).values());
     }
-    const event = this.events[eventType][stateKey];
+    const event = this.events.get(eventType).get(stateKey);
     return event ? event : null;
 };
 
@@ -236,9 +237,8 @@ RoomState.prototype.clone = function() {
     const status = this._oobMemberFlags.status;
     this._oobMemberFlags.status = OOB_STATUS_NOTSTARTED;
 
-    Object.values(this.events).forEach((eventsByStateKey) => {
-        const eventsForType = Object.values(eventsByStateKey);
-        copy.setStateEvents(eventsForType);
+    Array.from(this.events.values()).forEach((eventsByStateKey) => {
+        copy.setStateEvents(Array.from(eventsByStateKey.values()));
     });
 
     // Ugly hack: see above
@@ -274,8 +274,8 @@ RoomState.prototype.clone = function() {
  */
 RoomState.prototype.setUnknownStateEvents = function(events) {
     const unknownStateEvents = events.filter((event) => {
-        return this.events[event.getType()] === undefined ||
-            this.events[event.getType()][event.getStateKey()] === undefined;
+        return !this.events.has(event.getType()) ||
+            !this.events.get(event.getType()).has(event.getStateKey());
     });
 
     this.setStateEvents(unknownStateEvents);
@@ -296,7 +296,7 @@ RoomState.prototype.setStateEvents = function(stateEvents) {
     this._updateModifiedTime();
 
     // update the core event dict
-    utils.forEach(stateEvents, function(event) {
+    stateEvents.forEach(function(event) {
         if (event.getRoomId() !== self.roomId) {
             return;
         }
@@ -304,6 +304,7 @@ RoomState.prototype.setStateEvents = function(stateEvents) {
             return;
         }
 
+        const lastStateEvent = self._getStateEventMatching(event);
         self._setStateEvent(event);
         if (event.getType() === "m.room.member") {
             _updateDisplayNameCache(
@@ -311,14 +312,14 @@ RoomState.prototype.setStateEvents = function(stateEvents) {
             );
             _updateThirdPartyTokenCache(self, event);
         }
-        self.emit("RoomState.events", event, self);
+        self.emit("RoomState.events", event, self, lastStateEvent);
     });
 
     // update higher level data structures. This needs to be done AFTER the
     // core event dict as these structures may depend on other state events in
     // the given array (e.g. disambiguating display names in one go to do both
     // clashing names rather than progressively which only catches 1 of them).
-    utils.forEach(stateEvents, function(event) {
+    stateEvents.forEach(function(event) {
         if (event.getRoomId() !== self.roomId) {
             return;
         }
@@ -348,10 +349,16 @@ RoomState.prototype.setStateEvents = function(stateEvents) {
             self._updateMember(member);
             self.emit("RoomState.members", event, self, member);
         } else if (event.getType() === "m.room.power_levels") {
-            const members = utils.values(self.members);
-            utils.forEach(members, function(member) {
+            const members = Object.values(self.members);
+            members.forEach(function(member) {
+                // We only propagate `RoomState.members` event if the
+                // power levels has been changed
+                // large room suffer from large re-rendering especially when not needed
+                const oldLastModified = member.getLastModifiedTime();
                 member.setPowerLevelEvent(event);
-                self.emit("RoomState.members", event, self, member);
+                if (oldLastModified !== member.getLastModifiedTime()) {
+                    self.emit("RoomState.members", event, self, member);
+                }
             });
 
             // assume all our sentinels are now out-of-date
@@ -383,10 +390,15 @@ RoomState.prototype._getOrCreateMember = function(userId, event) {
 };
 
 RoomState.prototype._setStateEvent = function(event) {
-    if (this.events[event.getType()] === undefined) {
-        this.events[event.getType()] = {};
+    if (!this.events.has(event.getType())) {
+        this.events.set(event.getType(), new Map());
     }
-    this.events[event.getType()][event.getStateKey()] = event;
+    this.events.get(event.getType()).set(event.getStateKey(), event);
+};
+
+RoomState.prototype._getStateEventMatching = function(event) {
+    if (!this.events.has(event.getType())) return null;
+    return this.events.get(event.getType()).get(event.getStateKey());
 };
 
 RoomState.prototype._updateMember = function(member) {
@@ -447,7 +459,7 @@ RoomState.prototype.clearOutOfBandMembers = function() {
             delete this.members[userId];
         }
     });
-    console.log(`LL: RoomState removed ${count} members...`);
+    logger.log(`LL: RoomState removed ${count} members...`);
     this._oobMemberFlags.status = OOB_STATUS_NOTSTARTED;
 };
 
@@ -456,11 +468,11 @@ RoomState.prototype.clearOutOfBandMembers = function() {
  * @param {MatrixEvent[]} stateEvents array of membership state events
  */
 RoomState.prototype.setOutOfBandMembers = function(stateEvents) {
-    console.log(`LL: RoomState about to set ${stateEvents.length} OOB members ...`);
+    logger.log(`LL: RoomState about to set ${stateEvents.length} OOB members ...`);
     if (this._oobMemberFlags.status !== OOB_STATUS_INPROGRESS) {
         return;
     }
-    console.log(`LL: RoomState put in OOB_STATUS_FINISHED state ...`);
+    logger.log(`LL: RoomState put in OOB_STATUS_FINISHED state ...`);
     this._oobMemberFlags.status = OOB_STATUS_FINISHED;
     stateEvents.forEach((e) => this._setOutOfBandMember(e));
 };
@@ -499,7 +511,7 @@ RoomState.prototype._setOutOfBandMember = function(stateEvent) {
  * @param {MatrixEvent} event The typing event
  */
 RoomState.prototype.setTypingEvent = function(event) {
-    utils.forEach(utils.values(this.members), function(member) {
+    Object.values(this.members).forEach(function(member) {
         member.setTypingEvent(event);
     });
 };
@@ -668,7 +680,7 @@ RoomState.prototype._maySendEventOfType = function(eventType, userId, state) {
         const userPowerLevel = power_levels.users && power_levels.users[userId];
         if (Number.isFinite(userPowerLevel)) {
             powerLevel = userPowerLevel;
-        } else if(Number.isFinite(power_levels.users_default)) {
+        } else if (Number.isFinite(power_levels.users_default)) {
             powerLevel = power_levels.users_default;
         }
 
@@ -714,9 +726,14 @@ RoomState.prototype.mayTriggerNotifOfType = function(notifLevelKey, userId) {
 };
 
 /**
- * The RoomState class.
+ * Returns the join rule based on the m.room.join_rule state event, defaulting to `invite`.
+ * @returns {string} the join_rule applied to this room
  */
-module.exports = RoomState;
+RoomState.prototype.getJoinRule = function() {
+    const joinRuleEvent = this.getStateEvents(EventType.RoomJoinRules, "");
+    const joinRuleContent = joinRuleEvent ? joinRuleEvent.getContent() : {};
+    return joinRuleContent["join_rule"] || "invite";
+};
 
 
 function _updateThirdPartyTokenCache(roomState, memberEvent) {
@@ -772,8 +789,12 @@ function _updateDisplayNameCache(roomState, userId, displayName) {
  * @param {MatrixEvent} event The matrix event which caused this event to fire.
  * @param {RoomState} state The room state whose RoomState.events dictionary
  * was updated.
+ * @param {MatrixEvent} prevEvent The event being replaced by the new state, if
+ * known. Note that this can differ from `getPrevContent()` on the new state event
+ * as this is the store's view of the last state, not the previous state provided
+ * by the server.
  * @example
- * matrixClient.on("RoomState.events", function(event, state){
+ * matrixClient.on("RoomState.events", function(event, state, prevEvent){
  *   var newStateEvent = event;
  * });
  */

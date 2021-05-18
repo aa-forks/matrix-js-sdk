@@ -1,5 +1,6 @@
 /*
 Copyright 2015, 2016 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,12 +14,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
  * @module filter
  */
 
-const FilterComponent = require("./filter-component");
+import {FilterComponent} from "./filter-component";
 
 /**
  * @param {Object} obj
@@ -45,7 +46,7 @@ function setProp(obj, keyNesting, val) {
  * @prop {string} userId The user ID of the filter
  * @prop {?string} filterId The filter ID
  */
-function Filter(userId, filterId) {
+export function Filter(userId, filterId) {
     this.userId = userId;
     this.filterId = filterId;
     this.definition = {};
@@ -54,13 +55,6 @@ function Filter(userId, filterId) {
 Filter.LAZY_LOADING_MESSAGES_FILTER = {
     lazy_load_members: true,
 };
-
-Filter.LAZY_LOADING_SYNC_FILTER = {
-    room: {
-        state: Filter.LAZY_LOADING_MESSAGES_FILTER,
-    },
-};
-
 
 /**
  * Get the ID of this filter on your homeserver (if known)
@@ -95,6 +89,7 @@ Filter.prototype.setDefinition = function(definition) {
     //     "state": {
     //       "types": ["m.room.*"],
     //       "not_rooms": ["!726s6s6q:example.com"],
+    //       "lazy_load_members": true,
     //     },
     //     "timeline": {
     //       "limit": 10,
@@ -176,6 +171,10 @@ Filter.prototype.setTimelineLimit = function(limit) {
     setProp(this.definition, "room.timeline.limit", limit);
 };
 
+Filter.prototype.setLazyLoadMembers = function(enabled) {
+    setProp(this.definition, "room.state.lazy_load_members", !!enabled);
+};
+
 /**
  * Control whether left rooms should be included in responses.
  * @param {boolean} includeLeave True to make rooms the user has left appear
@@ -198,6 +197,3 @@ Filter.fromJson = function(userId, filterId, jsonObj) {
     filter.setDefinition(jsonObj);
     return filter;
 };
-
-/** The Filter class */
-module.exports = Filter;

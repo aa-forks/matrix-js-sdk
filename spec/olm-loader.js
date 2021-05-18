@@ -1,5 +1,6 @@
 /*
 Copyright 2017 Vector creations Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,11 +15,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// try to load the olm library.
+import {logger} from '../src/logger';
+import * as utils from "../src/utils";
 
+// try to load the olm library.
 try {
     global.Olm = require('olm');
-    console.log('loaded libolm');
+    logger.log('loaded libolm');
 } catch (e) {
-    console.warn("unable to run crypto tests: libolm not available");
+    logger.warn("unable to run crypto tests: libolm not available");
+}
+
+// also try to set node crypto
+try {
+    const crypto = require('crypto');
+    utils.setCrypto(crypto);
+} catch (err) {
+    logger.log('nodejs was compiled without crypto support: some tests will fail');
 }

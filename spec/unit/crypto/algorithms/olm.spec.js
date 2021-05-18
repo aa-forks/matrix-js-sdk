@@ -1,5 +1,6 @@
 /*
 Copyright 2018,2019 New Vector Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,22 +16,17 @@ limitations under the License.
 */
 
 import '../../../olm-loader';
-
-import expect from 'expect';
-import WebStorageSessionStore from '../../../../lib/store/session/webstorage';
-import MemoryCryptoStore from '../../../../lib/crypto/store/memory-crypto-store.js';
-import MockStorageApi from '../../../MockStorageApi';
-import testUtils from '../../../test-utils';
-
-import OlmDevice from '../../../../lib/crypto/OlmDevice';
-import olmlib from '../../../../lib/crypto/olmlib';
-import DeviceInfo from '../../../../lib/crypto/deviceinfo';
+import {MemoryCryptoStore} from "../../../../src/crypto/store/memory-crypto-store";
+import {MockStorageApi} from "../../../MockStorageApi";
+import {logger} from "../../../../src/logger";
+import {OlmDevice} from "../../../../src/crypto/OlmDevice";
+import * as olmlib from "../../../../src/crypto/olmlib";
+import {DeviceInfo} from "../../../../src/crypto/deviceinfo";
 
 function makeOlmDevice() {
     const mockStorage = new MockStorageApi();
-    const sessionStore = new WebStorageSessionStore(mockStorage);
     const cryptoStore = new MemoryCryptoStore(mockStorage);
-    const olmDevice = new OlmDevice(sessionStore, cryptoStore);
+    const olmDevice = new OlmDevice(cryptoStore);
     return olmDevice;
 }
 
@@ -45,20 +41,20 @@ async function setupSession(initiator, opponent) {
     return sid;
 }
 
-describe("OlmDecryption", function() {
+describe("OlmDevice", function() {
     if (!global.Olm) {
-        console.warn('Not running megolm unit tests: libolm not present');
+        logger.warn('Not running megolm unit tests: libolm not present');
         return;
     }
+
+    beforeAll(function() {
+        return global.Olm.init();
+    });
 
     let aliceOlmDevice;
     let bobOlmDevice;
 
     beforeEach(async function() {
-        testUtils.beforeEach(this); // eslint-disable-line no-invalid-this
-
-        await global.Olm.init();
-
         aliceOlmDevice = makeOlmDevice();
         bobOlmDevice = makeOlmDevice();
         await aliceOlmDevice.init();
@@ -83,6 +79,60 @@ describe("OlmDecryption", function() {
             expect(result.payload).toEqual(
                 "The olm or proteus is an aquatic salamander in the family Proteidae",
             );
+        });
+
+        it('exports picked account and olm sessions', async function() {
+            const sessionId = await setupSession(aliceOlmDevice, bobOlmDevice);
+
+            const exported = await bobOlmDevice.export();
+            // At this moment only Alice (the “initiator” in setupSession) has a session
+            expect(exported.sessions).toEqual([]);
+
+            const MESSAGE = (
+                "The olm or proteus is an aquatic salamander"
+                + " in the family Proteidae"
+            );
+            const ciphertext = await aliceOlmDevice.encryptMessage(
+                bobOlmDevice.deviceCurve25519Key,
+                sessionId,
+                MESSAGE,
+            );
+
+            const bobRecreatedOlmDevice = makeOlmDevice();
+            bobRecreatedOlmDevice.init({ fromExportedDevice: exported });
+
+            const decrypted = await bobRecreatedOlmDevice.createInboundSession(
+                aliceOlmDevice.deviceCurve25519Key,
+                ciphertext.type,
+                ciphertext.body,
+            );
+            expect(decrypted.payload).toEqual(MESSAGE);
+
+            const exportedAgain = await bobRecreatedOlmDevice.export();
+            // this time we expect Bob to have a session to export
+            expect(exportedAgain.sessions).toHaveLength(1);
+
+            const MESSAGE_2 = (
+                "In contrast to most amphibians,"
+                + " the olm is entirely aquatic"
+            );
+            const ciphertext2 = await aliceOlmDevice.encryptMessage(
+                bobOlmDevice.deviceCurve25519Key,
+                sessionId,
+                MESSAGE_2,
+            );
+
+            const bobRecreatedAgainOlmDevice = makeOlmDevice();
+            bobRecreatedAgainOlmDevice.init({ fromExportedDevice: exportedAgain });
+
+            // Note: "decrypted_2" does not have the same structure as "decrypted"
+            const decrypted2 = await bobRecreatedAgainOlmDevice.decryptMessage(
+                aliceOlmDevice.deviceCurve25519Key,
+                decrypted.session_id,
+                ciphertext2.type,
+                ciphertext2.body,
+            );
+            expect(decrypted2).toEqual(MESSAGE_2);
         });
 
         it("creates only one session at a time", async function() {
@@ -139,6 +189,92 @@ describe("OlmDecryption", function() {
             // have failed, so the second task should have tried to create a
             // new session and will have called claimOneTimeKeys
             expect(count).toBe(2);
+        });
+
+        it("avoids deadlocks when two tasks are ensuring the same devices", async function() {
+            // This test checks whether `ensureOlmSessionsForDevices` properly
+            // handles multiple tasks in flight ensuring some set of devices in
+            // common without deadlocks.
+
+            let claimRequestCount = 0;
+            const baseApis = {
+                claimOneTimeKeys: () => {
+                    // simulate a very slow server (.5 seconds to respond)
+                    claimRequestCount++;
+                    return new Promise((resolve, reject) => {
+                        setTimeout(reject, 500);
+                    });
+                },
+            };
+
+            const deviceBobA = DeviceInfo.fromStorage({
+                keys: {
+                    "curve25519:BOB-A": "akey",
+                },
+            }, "BOB-A");
+            const deviceBobB = DeviceInfo.fromStorage({
+                keys: {
+                    "curve25519:BOB-B": "bkey",
+                },
+            }, "BOB-B");
+
+            // There's no required ordering of devices per user, so here we
+            // create two different orderings so that each task reserves a
+            // device the other task needs before continuing.
+            const devicesByUserAB = {
+                "@bob:example.com": [
+                    deviceBobA,
+                    deviceBobB,
+                ],
+            };
+            const devicesByUserBA = {
+                "@bob:example.com": [
+                    deviceBobB,
+                    deviceBobA,
+                ],
+            };
+
+            function alwaysSucceed(promise) {
+                // swallow any exception thrown by a promise, so that
+                // Promise.all doesn't abort
+                return promise.catch(() => {});
+            }
+
+            const task1 = alwaysSucceed(olmlib.ensureOlmSessionsForDevices(
+                aliceOlmDevice, baseApis, devicesByUserAB,
+            ));
+
+            // After a single tick through the first task, it should have
+            // claimed ownership of all devices to avoid deadlocking others.
+            expect(Object.keys(aliceOlmDevice._sessionsInProgress).length).toBe(2);
+
+            const task2 = alwaysSucceed(olmlib.ensureOlmSessionsForDevices(
+                aliceOlmDevice, baseApis, devicesByUserBA,
+            ));
+
+            // The second task should not have changed the ownership count, as
+            // it's waiting on the first task.
+            expect(Object.keys(aliceOlmDevice._sessionsInProgress).length).toBe(2);
+
+            // Track the tasks, but don't await them yet.
+            const promises = Promise.all([
+                task1,
+                task2,
+            ]);
+
+            await new Promise((resolve) => {
+                setTimeout(resolve, 200);
+            });
+
+            // After .2s, the first task should have made an initial claim request.
+            expect(claimRequestCount).toBe(1);
+
+            await promises;
+
+            // After waiting for both tasks to complete, the first task should
+            // have failed, so the second task should have tried to create a
+            // new session and will have called claimOneTimeKeys
+            expect(claimRequestCount).toBe(2);
         });
     });
 });

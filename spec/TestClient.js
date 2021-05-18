@@ -16,17 +16,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-"use strict";
-
 // load olm before the sdk if possible
 import './olm-loader';
 
-import sdk from '..';
-import testUtils from './test-utils';
 import MockHttpBackend from 'matrix-mock-request';
-import expect from 'expect';
-import Promise from 'bluebird';
-import LocalStorageCryptoStore from '../lib/crypto/store/localStorage-crypto-store';
+import {LocalStorageCryptoStore} from '../src/crypto/store/localStorage-crypto-store';
+import {logger} from '../src/logger';
+import {WebStorageSessionStore} from "../src/store/session/webstorage";
+import {syncPromise} from "./test-utils";
+import {createClient} from "../src/matrix";
+import {MockStorageApi} from "./MockStorageApi";
 
 /**
  * Wrapper for a MockStorageApi, MockHttpBackend and MatrixClient
@@ -40,16 +39,16 @@ import LocalStorageCryptoStore from '../lib/crypto/store/localStorage-crypto-sto
  *     session store. If undefined, we will create a MockStorageApi.
  * @param {object} options additional options to pass to the client
  */
-export default function TestClient(
+export function TestClient(
     userId, deviceId, accessToken, sessionStoreBackend, options,
 ) {
     this.userId = userId;
     this.deviceId = deviceId;
 
     if (sessionStoreBackend === undefined) {
-        sessionStoreBackend = new testUtils.MockStorageApi();
+        sessionStoreBackend = new MockStorageApi();
     }
-    const sessionStore = new sdk.WebStorageSessionStore(sessionStoreBackend);
+    const sessionStore = new WebStorageSessionStore(sessionStoreBackend);
 
     this.httpBackend = new MockHttpBackend();
 
@@ -66,10 +65,13 @@ export default function TestClient(
         this.cryptoStore = new LocalStorageCryptoStore(sessionStoreBackend);
         options.cryptoStore = this.cryptoStore;
     }
-    this.client = sdk.createClient(options);
+    this.client = createClient(options);
 
     this.deviceKeys = null;
     this.oneTimeKeys = {};
+    this._callEventHandler = {
+        calls: new Map(),
+    };
 }
 
 TestClient.prototype.toString = function() {
@@ -82,7 +84,7 @@ TestClient.prototype.toString = function() {
  * @return {Promise}
  */
 TestClient.prototype.start = function() {
-    console.log(this + ': starting');
+    logger.log(this + ': starting');
     this.httpBackend.when("GET", "/pushrules").respond(200, {});
     this.httpBackend.when("POST", "/filter").respond(200, { filter_id: "fid" });
     this.expectDeviceKeyUpload();
@@ -98,9 +100,9 @@ TestClient.prototype.start = function() {
 
     return Promise.all([
         this.httpBackend.flushAllExpected(),
-        testUtils.syncPromise(this.client),
+        syncPromise(this.client),
     ]).then(() => {
-        console.log(this + ': started');
+        logger.log(this + ': started');
     });
 };
 
@@ -122,7 +124,7 @@ TestClient.prototype.expectDeviceKeyUpload = function() {
         expect(content.one_time_keys).toBe(undefined);
         expect(content.device_keys).toBeTruthy();
 
-        console.log(self + ': received device keys');
+        logger.log(self + ': received device keys');
         // we expect this to happen before any one-time keys are uploaded.
         expect(Object.keys(self.oneTimeKeys).length).toEqual(0);
 
@@ -158,8 +160,8 @@ TestClient.prototype.awaitOneTimeKeyUpload = function() {
           .respond(200, (path, content) => {
               expect(content.device_keys).toBe(undefined);
               expect(content.one_time_keys).toBeTruthy();
-              expect(content.one_time_keys).toNotEqual({});
-              console.log('%s: received %i one-time keys', this,
+              expect(content.one_time_keys).not.toEqual({});
+              logger.log('%s: received %i one-time keys', this,
                           Object.keys(content.one_time_keys).length);
               this.oneTimeKeys = content.one_time_keys;
               return {one_time_key_counts: {
@@ -186,7 +188,7 @@ TestClient.prototype.expectKeyQuery = function(response) {
         200, (path, content) => {
             Object.keys(response.device_keys).forEach((userId) => {
                 expect(content.device_keys[userId]).toEqual(
-                    {},
+                    [],
                     "Expected key query for " + userId + ", got " +
                     Object.keys(content.device_keys),
                 );
@@ -223,11 +225,15 @@ TestClient.prototype.getSigningKey = function() {
  * @returns {Promise} promise which completes once the sync has been flushed
  */
 TestClient.prototype.flushSync = function() {
-    console.log(`${this}: flushSync`);
+    logger.log(`${this}: flushSync`);
     return Promise.all([
         this.httpBackend.flush('/sync', 1),
-        testUtils.syncPromise(this.client),
+        syncPromise(this.client),
     ]).then(() => {
-        console.log(`${this}: flushSync completed`);
+        logger.log(`${this}: flushSync completed`);
     });
+};
+
+TestClient.prototype.isFallbackICEServerAllowed = function() {
+    return true;
 };

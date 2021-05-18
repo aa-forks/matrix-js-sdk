@@ -1,4 +1,3 @@
-"use strict";
 console.log("Loading browser sdk");
 var BASE_URL = "https://matrix.org";
 var TOKEN = "accesstokengoeshere";
@@ -32,6 +31,23 @@ function addListeners(call) {
         call.hangup();
         disableButtons(false, true, true);
     });
+    call.on("feeds_changed", function(feeds) {
+        const localFeed = feeds.find((feed) => feed.isLocal());
+        const remoteFeed = feeds.find((feed) => !feed.isLocal());
+
+        const remoteElement = document.getElementById("remote");
+        const localElement = document.getElementById("local");
+
+        if (remoteFeed) {
+            remoteElement.srcObject = remoteFeed.stream;
+            remoteElement.play();
+        }
+        if (localFeed) {
+            localElement.muted = true;
+            localElement.srcObject = localFeed.stream;
+            localElement.play();
+        }
+    });
 }
 
 window.onload = function() {
@@ -63,10 +79,7 @@ function syncComplete() {
         );
         console.log("Call => %s", call);
         addListeners(call);
-        call.placeVideoCall(
-            document.getElementById("remote"),
-            document.getElementById("local")
-        );
+        call.placeVideoCall();
         document.getElementById("result").innerHTML = "<p>Placed call.</p>";
         disableButtons(true, true, false);
     };

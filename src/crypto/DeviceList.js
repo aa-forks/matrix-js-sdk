@@ -1,6 +1,7 @@
 /*
 Copyright 2017 Vector Creations Ltd
-Copyright 2018 New Vector Ltd
+Copyright 2018, 2019 New Vector Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +15,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
 
 /**
  * @module crypto/DeviceList
@@ -22,12 +22,13 @@ limitations under the License.
  * Manages the list of other users' devices
  */
 
-import Promise from 'bluebird';
-
-import logger from '../logger';
-import DeviceInfo from './deviceinfo';
-import olmlib from './olmlib';
-import IndexedDBCryptoStore from './store/indexeddb-crypto-store';
+import {EventEmitter} from 'events';
+import {logger} from '../logger';
+import {DeviceInfo} from './deviceinfo';
+import {CrossSigningInfo} from './CrossSigning';
+import * as olmlib from './olmlib';
+import {IndexedDBCryptoStore} from './store/indexeddb-crypto-store';
+import {chunkPromises, defer, sleep} from '../utils';
 
 
 /* State transition diagram for DeviceList._deviceTrackingStatus
@@ -60,10 +61,11 @@ const TRACKING_STATUS_UP_TO_DATE = 3;
 /**
  * @alias module:crypto/DeviceList
  */
-export default class DeviceList {
-    constructor(baseApis, cryptoStore, sessionStore, olmDevice) {
+export class DeviceList extends EventEmitter {
+    constructor(baseApis, cryptoStore, olmDevice, keyDownloadChunkSize = 250) {
+        super();
+
         this._cryptoStore = cryptoStore;
-        this._sessionStore = sessionStore;
 
         // userId -> {
         //     deviceId -> {
@@ -71,6 +73,11 @@ export default class DeviceList {
         //     }
         // }
         this._devices = {};
+
+        // userId -> {
+        //     [key info]
+        // }
+        this._crossSigningInfo = {};
 
         // map of identity keys to the user who owns it
         this._userByIdentityKey = {};
@@ -91,6 +98,9 @@ export default class DeviceList {
         // userId -> promise
         this._keyDownloadsInProgressByUser = {};
 
+        // Maximum number of user IDs per request to prevent server overload (#1619)
+        this._keyDownloadChunkSize = keyDownloadChunkSize;
+
         // Set whenever changes are made other than setting the sync token
         this._dirty = false;
 
@@ -102,36 +112,25 @@ export default class DeviceList {
         this._savePromiseTime = null;
         // The timer used to delay the save
         this._saveTimer = null;
+        // True if we have fetched data from the server or loaded a non-empty
+        // set of device data from the store
+        this._hasFetched = null;
     }
 
     /**
      * Load the device tracking state from storage
      */
     async load() {
-        let shouldDeleteSessionStore = false;
         await this._cryptoStore.doTxn(
-            // migrate from session store if there's data there and not here
-            'readwrite', [IndexedDBCryptoStore.STORE_DEVICE_DATA], (txn) => {
+            'readonly', [IndexedDBCryptoStore.STORE_DEVICE_DATA], (txn) => {
                 this._cryptoStore.getEndToEndDeviceData(txn, (deviceData) => {
-                    if (deviceData === null) {
-                        logger.log("Migrating e2e device data...");
-                        this._devices = this._sessionStore.getAllEndToEndDevices() || {};
-                        this._deviceTrackingStatus = (
-                            this._sessionStore.getEndToEndDeviceTrackingStatus() || {}
-                        );
-                        this._syncToken = this._sessionStore.getEndToEndDeviceSyncToken();
-                        this._cryptoStore.storeEndToEndDeviceData({
-                            devices: this._devices,
-                            trackingStatus: this._deviceTrackingStatus,
-                            syncToken: this._syncToken,
-                        }, txn);
-                        shouldDeleteSessionStore = true;
-                    } else {
-                        this._devices = deviceData ? deviceData.devices : {},
-                        this._deviceTrackingStatus = deviceData ?
-                            deviceData.trackingStatus : {};
-                        this._syncToken = deviceData ? deviceData.syncToken : null;
-                    }
+                    this._hasFetched = Boolean(deviceData && deviceData.devices);
+                    this._devices = deviceData ? deviceData.devices : {},
+                    this._crossSigningInfo = deviceData ?
+                        deviceData.crossSigningInfo || {} : {};
+                    this._deviceTrackingStatus = deviceData ?
+                        deviceData.trackingStatus : {};
+                    this._syncToken = deviceData ? deviceData.syncToken : null;
                     this._userByIdentityKey = {};
                     for (const user of Object.keys(this._devices)) {
                         const userDevices = this._devices[user];
@@ -145,11 +144,6 @@ export default class DeviceList {
                 });
             },
         );
-
-        if (shouldDeleteSessionStore) {
-            // migrated data is now safely persisted: remove from old store
-            this._sessionStore.removeEndToEndDeviceData();
-        }
 
         for (const u of Object.keys(this._deviceTrackingStatus)) {
             // if a download was in progress when we got shut down, it isn't any more.
@@ -210,26 +204,33 @@ export default class DeviceList {
             const resolveSavePromise = this._resolveSavePromise;
             this._savePromiseTime = targetTime;
             this._saveTimer = setTimeout(() => {
-                logger.log('Saving device tracking data at token ' + this._syncToken);
+                logger.log('Saving device tracking data', this._syncToken);
+
                 // null out savePromise now (after the delay but before the write),
                 // otherwise we could return the existing promise when the save has
-                // actually already happened. Likewise for the dirty flag.
+                // actually already happened.
                 this._savePromiseTime = null;
                 this._saveTimer = null;
                 this._savePromise = null;
                 this._resolveSavePromise = null;
 
-                this._dirty = false;
                 this._cryptoStore.doTxn(
                     'readwrite', [IndexedDBCryptoStore.STORE_DEVICE_DATA], (txn) => {
                         this._cryptoStore.storeEndToEndDeviceData({
                             devices: this._devices,
+                            crossSigningInfo: this._crossSigningInfo,
                             trackingStatus: this._deviceTrackingStatus,
                             syncToken: this._syncToken,
                         }, txn);
                     },
                 ).then(() => {
+                    // The device list is considered dirty until the write
+                    // completes.
+                    this._dirty = false;
                     resolveSavePromise();
+                }, err => {
+                    logger.error('Failed to save device tracking data', this._syncToken);
+                    logger.error(err);
                 });
             }, delay);
         }
@@ -324,6 +325,15 @@ export default class DeviceList {
     }
 
     /**
+     * Returns a list of all user IDs the DeviceList knows about
+     *
+     * @return {array} All known user IDs
+     */
+    getKnownUserIds() {
+        return Object.keys(this._devices);
+    }
+
+    /**
      * Get the stored device keys for a user id
      *
      * @param {string} userId the user to list keys for.
@@ -357,6 +367,17 @@ export default class DeviceList {
         return this._devices[userId];
     }
 
+    getStoredCrossSigningForUser(userId) {
+        if (!this._crossSigningInfo[userId]) return null;
+
+        return CrossSigningInfo.fromStorage(this._crossSigningInfo[userId], userId);
+    }
+
+    storeCrossSigningForUser(userId, info) {
+        this._crossSigningInfo[userId] = info;
+        this._dirty = true;
+    }
+
     /**
      * Get the stored keys for a single device
      *
@@ -375,6 +396,26 @@ export default class DeviceList {
     }
 
     /**
+     * Get a user ID by one of their device's curve25519 identity key
+     *
+     * @param {string} algorithm  encryption algorithm
+     * @param {string} senderKey  curve25519 key to match
+     *
+     * @return {string} user ID
+     */
+    getUserByIdentityKey(algorithm, senderKey) {
+        if (
+            algorithm !== olmlib.OLM_ALGORITHM &&
+            algorithm !== olmlib.MEGOLM_ALGORITHM
+        ) {
+            // we only deal in olm keys
+            return null;
+        }
+
+        return this._userByIdentityKey[senderKey];
+    }
+
+    /**
      * Find a device by curve25519 identity key
      *
      * @param {string} algorithm  encryption algorithm
@@ -383,16 +424,8 @@ export default class DeviceList {
      * @return {module:crypto/deviceinfo?}
      */
     getDeviceByIdentityKey(algorithm, senderKey) {
-        const userId = this._userByIdentityKey[senderKey];
+        const userId = this.getUserByIdentityKey(algorithm, senderKey);
         if (!userId) {
-            return null;
-        }
-
-        if (
-            algorithm !== olmlib.OLM_ALGORITHM &&
-            algorithm !== olmlib.MEGOLM_ALGORITHM
-        ) {
-            // we only deal in olm keys
             return null;
         }
 
@@ -584,6 +617,10 @@ export default class DeviceList {
         }
     }
 
+    setRawStoredCrossSigningForUser(userId, info) {
+        this._crossSigningInfo[userId] = info;
+    }
+
     /**
      * Fire off download update requests for the given users, and update the
      * device list tracking status for them, and the
@@ -591,7 +628,7 @@ export default class DeviceList {
      *
      * @param {String[]} users  list of userIds
      *
-     * @return {module:client.Promise} resolves when all the users listed have
+     * @return {Promise} resolves when all the users listed have
      *     been updated. rejects if there was a problem updating any of the
      *     users.
      */
@@ -622,6 +659,7 @@ export default class DeviceList {
         });
 
         const finished = (success) => {
+            this.emit("crypto.willUpdateDevices", users, !this._hasFetched);
             users.forEach((u) => {
                 this._dirty = true;
 
@@ -647,6 +685,8 @@ export default class DeviceList {
                 }
             });
             this.saveIfDirty();
+            this.emit("crypto.devicesUpdated", users, !this._hasFetched);
+            this._hasFetched = true;
         };
 
         return prom;
@@ -695,7 +735,7 @@ class DeviceListUpdateSerialiser {
      * @param {String} syncToken sync token to pass in the query request, to
      *     help the HS give the most recent results
      *
-     * @return {module:client.Promise} resolves when all the users listed have
+     * @return {Promise} resolves when all the users listed have
      *     been updated. rejects if there was a problem updating any of the
      *     users.
      */
@@ -705,7 +745,7 @@ class DeviceListUpdateSerialiser {
         });
 
         if (!this._queuedQueryDeferred) {
-            this._queuedQueryDeferred = Promise.defer();
+            this._queuedQueryDeferred = defer();
         }
 
         // We always take the new sync token and just use the latest one we've
@@ -743,25 +783,41 @@ class DeviceListUpdateSerialiser {
             opts.token = this._syncToken;
         }
 
-        this._baseApis.downloadKeysForUsers(
-            downloadUsers, opts,
-        ).then((res) => {
-            const dk = res.device_keys || {};
+        const factories = [];
+        for (let i = 0; i < downloadUsers.length; i += this._deviceList._keyDownloadChunkSize) {
+            const userSlice = downloadUsers.slice(i, i + this._deviceList._keyDownloadChunkSize);
+            factories.push(() => this._baseApis.downloadKeysForUsers(userSlice, opts));
+        }
 
-            // do each user in a separate promise, to avoid wedging the CPU
-            // (https://github.com/vector-im/riot-web/issues/3158)
+        chunkPromises(factories, 3).then(async (responses) => {
+            const dk = Object.assign({}, ...(responses.map(res => res.device_keys || {})));
+            const masterKeys = Object.assign({}, ...(responses.map(res => res.master_keys || {})));
+            const ssks = Object.assign({}, ...(responses.map(res => res.self_signing_keys || {})));
+            const usks = Object.assign({}, ...(responses.map(res => res.user_signing_keys || {})));
+
+            // yield to other things that want to execute in between users, to
+            // avoid wedging the CPU
+            // (https://github.com/vector-im/element-web/issues/3158)
             //
             // of course we ought to do this in a web worker or similar, but
             // this serves as an easy solution for now.
-            let prom = Promise.resolve();
             for (const userId of downloadUsers) {
-                prom = prom.delay(5).then(() => {
-                    return this._processQueryResponseForUser(userId, dk[userId]);
-                });
+                await sleep(5);
+                try {
+                    await this._processQueryResponseForUser(
+                        userId, dk[userId], {
+                            master: masterKeys[userId],
+                            self_signing: ssks[userId],
+                            user_signing: usks[userId],
+                        },
+                    );
+                } catch (e) {
+                    // log the error but continue, so that one bad key
+                    // doesn't kill the whole process
+                    logger.error(`Error processing keys for ${userId}:`, e);
+                }
             }
-
-            return prom;
-        }).done(() => {
+        }).then(() => {
             logger.log('Completed key download for ' + downloadUsers);
 
             this._downloadInProgress = false;
@@ -780,36 +836,66 @@ class DeviceListUpdateSerialiser {
         return deferred.promise;
     }
 
-    async _processQueryResponseForUser(userId, response) {
-        logger.log('got keys for ' + userId + ':', response);
+    async _processQueryResponseForUser(
+        userId, dkResponse, crossSigningResponse,
+    ) {
+        logger.log('got device keys for ' + userId + ':', dkResponse);
+        logger.log('got cross-signing keys for ' + userId + ':', crossSigningResponse);
 
-        // map from deviceid -> deviceinfo for this user
-        const userStore = {};
-        const devs = this._deviceList.getRawStoredDevicesForUser(userId);
-        if (devs) {
-            Object.keys(devs).forEach((deviceId) => {
-                const d = DeviceInfo.fromStorage(devs[deviceId], deviceId);
-                userStore[deviceId] = d;
+        {
+            // map from deviceid -> deviceinfo for this user
+            const userStore = {};
+            const devs = this._deviceList.getRawStoredDevicesForUser(userId);
+            if (devs) {
+                Object.keys(devs).forEach((deviceId) => {
+                    const d = DeviceInfo.fromStorage(devs[deviceId], deviceId);
+                    userStore[deviceId] = d;
+                });
+            }
+
+            await _updateStoredDeviceKeysForUser(
+                this._olmDevice, userId, userStore, dkResponse || {},
+                this._baseApis.getUserId(), this._baseApis.deviceId,
+            );
+
+            // put the updates into the object that will be returned as our results
+            const storage = {};
+            Object.keys(userStore).forEach((deviceId) => {
+                storage[deviceId] = userStore[deviceId].toStorage();
             });
+
+            this._deviceList._setRawStoredDevicesForUser(userId, storage);
         }
 
-        await _updateStoredDeviceKeysForUser(
-            this._olmDevice, userId, userStore, response || {},
-        );
+        // now do the same for the cross-signing keys
+        {
+            // FIXME: should we be ignoring empty cross-signing responses, or
+            // should we be dropping the keys?
+            if (crossSigningResponse
+                && (crossSigningResponse.master || crossSigningResponse.self_signing
+                    || crossSigningResponse.user_signing)) {
+                const crossSigning
+                      = this._deviceList.getStoredCrossSigningForUser(userId)
+                      || new CrossSigningInfo(userId);
 
-        // put the updates into thr object that will be returned as our results
-        const storage = {};
-        Object.keys(userStore).forEach((deviceId) => {
-            storage[deviceId] = userStore[deviceId].toStorage();
-        });
+                crossSigning.setKeys(crossSigningResponse);
 
-        this._deviceList._setRawStoredDevicesForUser(userId, storage);
+                this._deviceList.setRawStoredCrossSigningForUser(
+                    userId, crossSigning.toStorage(),
+                );
+
+                // NB. Unlike most events in the js-sdk, this one is internal to the
+                // js-sdk and is not re-emitted
+                this._deviceList.emit('userCrossSigningUpdated', userId);
+            }
+        }
     }
 }
 
 
-async function _updateStoredDeviceKeysForUser(_olmDevice, userId, userStore,
-        userResult) {
+async function _updateStoredDeviceKeysForUser(
+    _olmDevice, userId, userStore, userResult, localUserId, localDeviceId,
+) {
     let updated = false;
 
     // remove any devices in the store which aren't in the response
@@ -819,6 +905,13 @@ async function _updateStoredDeviceKeysForUser(_olmDevice, userId, userStore,
         }
 
         if (!(deviceId in userResult)) {
+            if (userId === localUserId && deviceId === localDeviceId) {
+                logger.warn(
+                    `Local device ${deviceId} missing from sync, skipping removal`,
+                );
+                continue;
+            }
+
             logger.log("Device " + userId + ":" + deviceId +
                 " has been removed");
             delete userStore[deviceId];
@@ -877,6 +970,7 @@ async function _storeDeviceKeys(_olmDevice, userStore, deviceResult) {
     }
 
     const unsigned = deviceResult.unsigned || {};
+    const signatures = deviceResult.signatures || {};
 
     try {
         await olmlib.verifySignature(_olmDevice, deviceResult, userId, deviceId, signKey);
@@ -909,5 +1003,6 @@ async function _storeDeviceKeys(_olmDevice, userStore, deviceResult) {
     deviceStore.keys = deviceResult.keys || {};
     deviceStore.algorithms = deviceResult.algorithms || [];
     deviceStore.unsigned = unsigned;
+    deviceStore.signatures = signatures;
     return true;
 }

@@ -1,16 +1,9 @@
-"use strict";
-import 'source-map-support/register';
-import Promise from 'bluebird';
-
-const sdk = require("../..");
-const HttpBackend = require("matrix-mock-request");
-const utils = require("../test-utils");
-const EventStatus = sdk.EventStatus;
-
-import expect from 'expect';
+import {EventStatus} from "../../src/matrix";
+import {MatrixScheduler} from "../../src/scheduler";
+import {Room} from "../../src/models/room";
+import {TestClient} from "../TestClient";
 
 describe("MatrixClient retrying", function() {
-    const baseUrl = "http://localhost.or.something";
     let client = null;
     let httpBackend = null;
     let scheduler;
@@ -20,17 +13,17 @@ describe("MatrixClient retrying", function() {
     let room;
 
     beforeEach(function() {
-        utils.beforeEach(this); // eslint-disable-line no-invalid-this
-        httpBackend = new HttpBackend();
-        sdk.request(httpBackend.requestFn);
-        scheduler = new sdk.MatrixScheduler();
-        client = sdk.createClient({
-            baseUrl: baseUrl,
-            userId: userId,
-            accessToken: accessToken,
-            scheduler: scheduler,
-        });
-        room = new sdk.Room(roomId);
+        scheduler = new MatrixScheduler();
+        const testClient = new TestClient(
+            userId,
+            "DEVICE",
+            accessToken,
+            undefined,
+            {scheduler},
+        );
+        httpBackend = testClient.httpBackend;
+        client = testClient.client;
+        room = new Room(roomId);
         client.store.storeRoom(room);
     });
 
@@ -97,7 +90,7 @@ describe("MatrixClient retrying", function() {
         // wait for the localecho of ev1 to be updated
         const p3 = new Promise((resolve, reject) => {
             room.on("Room.localEchoUpdated", (ev0) => {
-                if(ev0 === ev1) {
+                if (ev0 === ev1) {
                     resolve();
                 }
             });

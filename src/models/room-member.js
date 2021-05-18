@@ -1,5 +1,6 @@
 /*
 Copyright 2015, 2016 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,14 +14,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
  * @module models/room-member
  */
-const EventEmitter = require("events").EventEmitter;
-const ContentRepo = require("../content-repo");
 
-const utils = require("../utils");
+import {EventEmitter} from "events";
+import {getHttpUriForMxc} from "../content-repo";
+import * as utils from "../utils";
 
 /**
  * Construct a new room member.
@@ -45,7 +46,7 @@ const utils = require("../utils");
  * @prop {Object} events The events describing this RoomMember.
  * @prop {MatrixEvent} events.member The m.room.member event for this RoomMember.
  */
-function RoomMember(roomId, userId) {
+export function RoomMember(roomId, userId) {
     this.roomId = roomId;
     this.userId = userId;
     this.typing = false;
@@ -132,14 +133,15 @@ RoomMember.prototype.setPowerLevelEvent = function(powerLevelEvent) {
     const evContent = powerLevelEvent.getDirectionalContent();
 
     let maxLevel = evContent.users_default || 0;
-    utils.forEach(utils.values(evContent.users), function(lvl) {
+    const users = evContent.users || {};
+    Object.values(users).forEach(function(lvl) {
         maxLevel = Math.max(maxLevel, lvl);
     });
     const oldPowerLevel = this.powerLevel;
     const oldPowerLevelNorm = this.powerLevelNorm;
 
-    if (evContent.users && evContent.users[this.userId] !== undefined) {
-        this.powerLevel = evContent.users[this.userId];
+    if (users[this.userId] !== undefined) {
+        this.powerLevel = users[this.userId];
     } else if (evContent.users_default !== undefined) {
         this.powerLevel = evContent.users_default;
     } else {
@@ -171,7 +173,7 @@ RoomMember.prototype.setTypingEvent = function(event) {
     const oldTyping = this.typing;
     this.typing = false;
     const typingList = event.getContent().user_ids;
-    if (!utils.isArray(typingList)) {
+    if (!Array.isArray(typingList)) {
         // malformed event :/ bail early. TODO: whine?
         return;
     }
@@ -249,7 +251,7 @@ RoomMember.prototype.getDMInviter = function() {
  * "crop" or "scale".
  * @param {Boolean} allowDefault (optional) Passing false causes this method to
  * return null if the user has no avatar image. Otherwise, a default image URL
- * will be returned. Default: true.
+ * will be returned. Default: true. (Deprecated)
  * @param {Boolean} allowDirectLinks (optional) If true, the avatar URL will be
  * returned even if it is a direct hyperlink rather than a matrix content URL.
  * If false, any non-matrix content URLs will be ignored. Setting this option to
@@ -268,15 +270,11 @@ RoomMember.prototype.getAvatarUrl =
     if (!rawUrl && !allowDefault) {
         return null;
     }
-    const httpUrl = ContentRepo.getHttpUriForMxc(
+    const httpUrl = getHttpUriForMxc(
         baseUrl, rawUrl, width, height, resizeMethod, allowDirectLinks,
     );
     if (httpUrl) {
         return httpUrl;
-    } else if (allowDefault) {
-        return ContentRepo.getIdenticonUri(
-            baseUrl, this.userId, width, height,
-        );
     }
     return null;
 };
@@ -285,13 +283,16 @@ RoomMember.prototype.getAvatarUrl =
  * @return {string} the mxc avatar url
  */
 RoomMember.prototype.getMxcAvatarUrl = function() {
-    if(this.events.member) {
+    if (this.events.member) {
         return this.events.member.getDirectionalContent().avatar_url;
-    } else if(this.user) {
+    } else if (this.user) {
         return this.user.avatarUrl;
     }
     return null;
 };
+
+const MXID_PATTERN = /@.+:.+/;
+const LTR_RTL_PATTERN = /[\u200E\u200F\u202A-\u202F]/;
 
 function calculateDisplayName(selfUserId, displayName, roomState) {
     if (!displayName || displayName === selfUserId) {
@@ -311,10 +312,18 @@ function calculateDisplayName(selfUserId, displayName, roomState) {
     // Next check if the name contains something that look like a mxid
     // If it does, it may be someone trying to impersonate someone else
     // Show full mxid in this case
-    // Also show mxid if there are other people with the same or similar
-    // displayname, after hidden character removal.
-    let disambiguate = /@.+:.+/.test(displayName);
+    let disambiguate = MXID_PATTERN.test(displayName);
+
     if (!disambiguate) {
+        // Also show mxid if the display name contains any LTR/RTL characters as these
+        // make it very difficult for us to find similar *looking* display names
+        // E.g "Mark" could be cloned by writing "kraM" but in RTL.
+        disambiguate = LTR_RTL_PATTERN.test(displayName);
+    }
+
+    if (!disambiguate) {
+        // Also show mxid if there are other people with the same or similar
+        // displayname, after hidden character removal.
         const userIds = roomState.getUserIdsWithDisplayName(displayName);
         disambiguate = userIds.some((u) => u !== selfUserId);
     }
@@ -324,11 +333,6 @@ function calculateDisplayName(selfUserId, displayName, roomState) {
     }
     return displayName;
 }
-
-/**
- * The RoomMember class.
- */
-module.exports = RoomMember;
 
 /**
  * Fires whenever any room member's name changes.
