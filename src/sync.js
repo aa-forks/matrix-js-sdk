@@ -2,6 +2,7 @@
 Copyright 2015, 2016 OpenMarket Ltd
 Copyright 2017 Vector Creations Ltd
 Copyright 2018 New Vector Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +16,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
 
 /*
  * TODO:
@@ -25,13 +25,16 @@ limitations under the License.
  * an alternative syncing API, we may want to have a proper syncing interface
  * for HTTP and WS at some point.
  */
-import Promise from 'bluebird';
-const User = require("./models/user");
-const Room = require("./models/room");
-const Group = require('./models/group');
-const utils = require("./utils");
-const Filter = require("./filter");
-const EventTimeline = require("./models/event-timeline");
+
+import {User} from "./models/user";
+import {Room} from "./models/room";
+import {Group} from "./models/group";
+import * as utils from "./utils";
+import {Filter} from "./filter";
+import {EventTimeline} from "./models/event-timeline";
+import {PushProcessor} from "./pushprocessor";
+import {logger} from './logger';
+import {InvalidStoreError} from './errors';
 
 const DEBUG = true;
 
@@ -56,7 +59,7 @@ function debuglog(...params) {
     if (!DEBUG) {
         return;
     }
-    console.log(...params);
+    logger.log(...params);
 }
 
 
@@ -75,7 +78,7 @@ function debuglog(...params) {
  * @param {Boolean=} opts.disablePresence True to perform syncing without automatically
  * updating presence.
  */
-function SyncApi(client, opts) {
+export function SyncApi(client, opts) {
     this.client = client;
     opts = opts || {};
     opts.initialSyncLimit = (
@@ -90,15 +93,17 @@ function SyncApi(client, opts) {
         };
     }
     this.opts = opts;
-    this._peekRoomId = null;
+    this._peekRoom = null;
     this._currentSyncRequest = null;
     this._syncState = null;
+    this._syncStateData = null; // additional data (eg. error object for failed sync)
     this._catchingUp = false;
     this._running = false;
     this._keepAliveTimer = null;
     this._connectionReturnedDefer = null;
     this._notifEvents = []; // accumulator of sync events in the current sync response
     this._failedSyncCount = 0; // Number of consecutive failed /sync requests
+    this._storeIsInvalid = false; // flag set if the store needs to be cleared before we can start
 
     if (client.getNotifTimelineSet()) {
         client.reEmitter.reEmit(client.getNotifTimelineSet(),
@@ -112,15 +117,25 @@ function SyncApi(client, opts) {
  */
 SyncApi.prototype.createRoom = function(roomId) {
     const client = this.client;
-    const room = new Room(roomId, {
+    const {
+        timelineSupport,
+        unstableClientRelationAggregation,
+    } = client;
+    const room = new Room(roomId, client, client.getUserId(), {
+        lazyLoadMembers: this.opts.lazyLoadMembers,
         pendingEventOrdering: this.opts.pendingEventOrdering,
-        timelineSupport: client.timelineSupport,
+        timelineSupport,
+        unstableClientRelationAggregation,
     });
-    client.reEmitter.reEmit(room, ["Room.name", "Room.timeline", "Room.redaction",
+    client.reEmitter.reEmit(room, ["Room.name", "Room.timeline",
+                          "Room.redaction",
+                          "Room.redactionCancelled",
                           "Room.receipt", "Room.tags",
                           "Room.timelineReset",
                           "Room.localEchoUpdated",
                           "Room.accountData",
+                          "Room.myMembership",
+                          "Room.replaceEvent",
                          ]);
     this._registerStateListeners(room);
     return room;
@@ -231,7 +246,7 @@ SyncApi.prototype.syncLeftRooms = function() {
 
             self._processRoomEvents(room, stateEvents, timelineEvents);
 
-            room.recalculate(client.credentials.userId);
+            room.recalculate();
             client.store.storeRoom(room);
             client.emit("Room", room);
 
@@ -249,33 +264,29 @@ SyncApi.prototype.syncLeftRooms = function() {
  * store.
  */
 SyncApi.prototype.peek = function(roomId) {
-    const self = this;
+    if (this._peekRoom && this._peekRoom.roomId === roomId) {
+        return Promise.resolve(this._peekRoom);
+    }
+
     const client = this.client;
-    this._peekRoomId = roomId;
-    return this.client.roomInitialSync(roomId, 20).then(function(response) {
+    this._peekRoom = this.createRoom(roomId);
+    return this.client.roomInitialSync(roomId, 20).then((response) => {
         // make sure things are init'd
         response.messages = response.messages || {};
         response.messages.chunk = response.messages.chunk || [];
         response.state = response.state || [];
 
-        const peekRoom = self.createRoom(roomId);
-
         // FIXME: Mostly duplicated from _processRoomEvents but not entirely
         // because "state" in this API is at the BEGINNING of the chunk
-        const oldStateEvents = utils.map(
-            utils.deepCopy(response.state), client.getEventMapper(),
-        );
-        const stateEvents = utils.map(
-            response.state, client.getEventMapper(),
-        );
-        const messages = utils.map(
-            response.messages.chunk, client.getEventMapper(),
-        );
+        const oldStateEvents = utils.deepCopy(response.state)
+            .map(client.getEventMapper());
+        const stateEvents = response.state.map(client.getEventMapper());
+        const messages = response.messages.chunk.map(client.getEventMapper());
 
         // XXX: copypasted from /sync until we kill off this
         // minging v1 API stuff)
         // handle presence events (User objects)
-        if (response.presence && utils.isArray(response.presence)) {
+        if (response.presence && Array.isArray(response.presence)) {
             response.presence.map(client.getEventMapper()).forEach(
             function(presenceEvent) {
                 let user = client.store.getUser(presenceEvent.getContent().user_id);
@@ -294,28 +305,28 @@ SyncApi.prototype.peek = function(roomId) {
         // fire off pagination requests in response to the Room.timeline
         // events.
         if (response.messages.start) {
-            peekRoom.oldState.paginationToken = response.messages.start;
+            this._peekRoom.oldState.paginationToken = response.messages.start;
         }
 
         // set the state of the room to as it was after the timeline executes
-        peekRoom.oldState.setStateEvents(oldStateEvents);
-        peekRoom.currentState.setStateEvents(stateEvents);
+        this._peekRoom.oldState.setStateEvents(oldStateEvents);
+        this._peekRoom.currentState.setStateEvents(stateEvents);
 
-        self._resolveInvites(peekRoom);
-        peekRoom.recalculate(self.client.credentials.userId);
+        this._resolveInvites(this._peekRoom);
+        this._peekRoom.recalculate();
 
         // roll backwards to diverge old state. addEventsToTimeline
         // will overwrite the pagination token, so make sure it overwrites
         // it with the right thing.
-        peekRoom.addEventsToTimeline(messages.reverse(), true,
-                                     peekRoom.getLiveTimeline(),
+        this._peekRoom.addEventsToTimeline(messages.reverse(), true,
+                                     this._peekRoom.getLiveTimeline(),
                                      response.messages.start);
 
-        client.store.storeRoom(peekRoom);
-        client.emit("Room", peekRoom);
+        client.store.storeRoom(this._peekRoom);
+        client.emit("Room", this._peekRoom);
 
-        self._peekPoll(peekRoom);
-        return peekRoom;
+        this._peekPoll(this._peekRoom);
+        return this._peekRoom;
     });
 };
 
@@ -324,16 +335,16 @@ SyncApi.prototype.peek = function(roomId) {
  * peeked.
  */
 SyncApi.prototype.stopPeeking = function() {
-    this._peekRoomId = null;
+    this._peekRoom = null;
 };
 
 /**
  * Do a peek room poll.
  * @param {Room} peekRoom
- * @param {string} token from= token
+ * @param {string?} token from= token
  */
 SyncApi.prototype._peekPoll = function(peekRoom, token) {
-    if (this._peekRoomId !== peekRoom.roomId) {
+    if (this._peekRoom !== peekRoom) {
         debuglog("Stopped peeking in room %s", peekRoom.roomId);
         return;
     }
@@ -344,8 +355,8 @@ SyncApi.prototype._peekPoll = function(peekRoom, token) {
         room_id: peekRoom.roomId,
         timeout: 30 * 1000,
         from: token,
-    }, undefined, 50 * 1000).done(function(res) {
-        if (self._peekRoomId !== peekRoom.roomId) {
+    }, undefined, 50 * 1000).then(function(res) {
+        if (self._peekRoom !== peekRoom) {
             debuglog("Stopped peeking in room %s", peekRoom.roomId);
             return;
         }
@@ -373,14 +384,16 @@ SyncApi.prototype._peekPoll = function(peekRoom, token) {
         });
 
         // strip out events which aren't for the given room_id (e.g presence)
+        // and also ephemeral events (which we're assuming is anything without
+        // and event ID because the /events API doesn't separate them).
         const events = res.chunk.filter(function(e) {
-            return e.room_id === peekRoom.roomId;
+            return e.room_id === peekRoom.roomId && e.event_id;
         }).map(self.client.getEventMapper());
 
         peekRoom.addLiveEvents(events);
         self._peekPoll(peekRoom, res.end);
     }, function(err) {
-        console.error("[%s] Peek poll failed: %s", peekRoom.roomId, err);
+        logger.error("[%s] Peek poll failed: %s", peekRoom.roomId, err);
         setTimeout(function() {
             self._peekPoll(peekRoom, token);
         }, 30 * 1000);
@@ -396,6 +409,18 @@ SyncApi.prototype.getSyncState = function() {
     return this._syncState;
 };
 
+/**
+ * Returns the additional data object associated with
+ * the current sync state, or null if there is no
+ * such data.
+ * Sync errors, if available, are put in the 'error' key of
+ * this object.
+ * @return {?Object}
+ */
+SyncApi.prototype.getSyncStateData = function() {
+    return this._syncStateData;
+};
+
 SyncApi.prototype.recoverFromSyncStartupError = async function(savedSyncPromise, err) {
     // Wait for the saved sync to complete - we send the pushrules and filter requests
     // before the saved sync has finished so they can run in parallel, but only process
@@ -408,6 +433,36 @@ SyncApi.prototype.recoverFromSyncStartupError = async function(savedSyncPromise,
 };
 
 /**
+ * Is the lazy loading option different than in previous session?
+ * @param {bool} lazyLoadMembers current options for lazy loading
+ * @return {bool} whether or not the option has changed compared to the previous session */
+SyncApi.prototype._wasLazyLoadingToggled = async function(lazyLoadMembers) {
+    lazyLoadMembers = !!lazyLoadMembers;
+    // assume it was turned off before
+    // if we don't know any better
+    let lazyLoadMembersBefore = false;
+    const isStoreNewlyCreated = await this.client.store.isNewlyCreated();
+    if (!isStoreNewlyCreated) {
+        const prevClientOptions = await this.client.store.getClientOptions();
+        if (prevClientOptions) {
+            lazyLoadMembersBefore = !!prevClientOptions.lazyLoadMembers;
+        }
+        return lazyLoadMembersBefore !== lazyLoadMembers;
+    }
+    return false;
+};
+
+SyncApi.prototype._shouldAbortSync = function(error) {
+    if (error.errcode === "M_UNKNOWN_TOKEN") {
+        // The logout already happened, we just need to stop.
+        logger.warn("Token no longer valid - assuming logout");
+        this.stop();
+        return true;
+    }
+    return false;
+};
+
+/**
  * Main entry point
  */
 SyncApi.prototype.sync = function() {
@@ -416,9 +471,9 @@ SyncApi.prototype.sync = function() {
 
     this._running = true;
 
-    if (global.document) {
+    if (global.window && global.window.addEventListener) {
         this._onOnlineBound = this._onOnline.bind(this);
-        global.document.addEventListener("online", this._onOnlineBound, false);
+        global.window.addEventListener("online", this._onOnlineBound, false);
     }
 
     let savedSyncPromise = Promise.resolve();
@@ -429,30 +484,92 @@ SyncApi.prototype.sync = function() {
     //   1) We need to get push rules so we can check if events should bing as we get
     //      them from /sync.
     //   2) We need to get/create a filter which we can use for /sync.
+    //   3) We need to check the lazy loading option matches what was used in the
+    //       stored sync. If it doesn't, we can't use the stored sync.
 
     async function getPushRules() {
         try {
+            debuglog("Getting push rules...");
             const result = await client.getPushRules();
             debuglog("Got push rules");
 
             client.pushRules = result;
         } catch (err) {
+            logger.error("Getting push rules failed", err);
+            if (self._shouldAbortSync(err)) return;
             // wait for saved sync to complete before doing anything else,
             // otherwise the sync state will end up being incorrect
+            debuglog("Waiting for saved sync before retrying push rules...");
             await self.recoverFromSyncStartupError(savedSyncPromise, err);
             getPushRules();
             return;
         }
-        getFilter(); // Now get the filter and start syncing
+        checkLazyLoadStatus(); // advance to the next stage
     }
 
+    function buildDefaultFilter() {
+        const filter = new Filter(client.credentials.userId);
+        filter.setTimelineLimit(self.opts.initialSyncLimit);
+        return filter;
+    }
+
+    const checkLazyLoadStatus = async () => {
+        debuglog("Checking lazy load status...");
+        if (this.opts.lazyLoadMembers && client.isGuest()) {
+            this.opts.lazyLoadMembers = false;
+        }
+        if (this.opts.lazyLoadMembers) {
+            debuglog("Checking server lazy load support...");
+            const supported = await client.doesServerSupportLazyLoading();
+            if (supported) {
+                debuglog("Enabling lazy load on sync filter...");
+                if (!this.opts.filter) {
+                    this.opts.filter = buildDefaultFilter();
+                }
+                this.opts.filter.setLazyLoadMembers(true);
+            } else {
+                debuglog("LL: lazy loading requested but not supported " +
+                    "by server, so disabling");
+                this.opts.lazyLoadMembers = false;
+            }
+        }
+        // need to vape the store when enabling LL and wasn't enabled before
+        debuglog("Checking whether lazy loading has changed in store...");
+        const shouldClear = await this._wasLazyLoadingToggled(this.opts.lazyLoadMembers);
+        if (shouldClear) {
+            this._storeIsInvalid = true;
+            const reason = InvalidStoreError.TOGGLED_LAZY_LOADING;
+            const error = new InvalidStoreError(reason, !!this.opts.lazyLoadMembers);
+            this._updateSyncState("ERROR", { error });
+            // bail out of the sync loop now: the app needs to respond to this error.
+            // we leave the state as 'ERROR' which isn't great since this normally means
+            // we're retrying. The client must be stopped before clearing the stores anyway
+            // so the app should stop the client, clear the store and start it again.
+            logger.warn("InvalidStoreError: store is not usable: stopping sync.");
+            return;
+        }
+        if (this.opts.lazyLoadMembers && this.opts.crypto) {
+            this.opts.crypto.enableLazyLoading();
+        }
+        try {
+            debuglog("Storing client options...");
+            await this.client._storeClientOptions();
+            debuglog("Stored client options");
+        } catch (err) {
+            logger.error("Storing client options failed", err);
+            throw err;
+        }
+
+        getFilter(); // Now get the filter and start syncing
+    };
+
     async function getFilter() {
+        debuglog("Getting filter...");
         let filter;
         if (self.opts.filter) {
             filter = self.opts.filter;
         } else {
-            filter = new Filter(client.credentials.userId);
-            filter.setTimelineLimit(self.opts.initialSyncLimit);
+            filter = buildDefaultFilter();
         }
 
         let filterId;
@@ -461,8 +578,11 @@ SyncApi.prototype.sync = function() {
                 getFilterName(client.credentials.userId), filter,
             );
         } catch (err) {
+            logger.error("Getting filter failed", err);
+            if (self._shouldAbortSync(err)) return;
             // wait for saved sync to complete before doing anything else,
             // otherwise the sync state will end up being incorrect
+            debuglog("Waiting for saved sync before retrying filter...");
             await self.recoverFromSyncStartupError(savedSyncPromise, err);
             getFilter();
             return;
@@ -476,11 +596,12 @@ SyncApi.prototype.sync = function() {
         if (self._currentSyncRequest === null) {
             // Send this first sync request here so we can then wait for the saved
             // sync data to finish processing before we process the results of this one.
-            console.log("Sending first sync request...");
+            debuglog("Sending first sync request...");
             self._currentSyncRequest = self._doSyncRequest({ filterId }, savedSyncToken);
         }
 
         // Now wait for the saved sync to finish...
+        debuglog("Waiting for saved sync before starting sync processing...");
         await savedSyncPromise;
         self._sync({ filterId });
     }
@@ -492,13 +613,19 @@ SyncApi.prototype.sync = function() {
         // Pull the saved sync token out first, before the worker starts sending
         // all the sync data which could take a while. This will let us send our
         // first incremental sync request before we've processed our saved data.
+        debuglog("Getting saved sync token...");
         savedSyncPromise = client.store.getSavedSyncToken().then((tok) => {
+            debuglog("Got saved sync token");
             savedSyncToken = tok;
+            debuglog("Getting saved sync...");
             return client.store.getSavedSync();
         }).then((savedSync) => {
+            debuglog(`Got reply from saved sync, exists? ${!!savedSync}`);
             if (savedSync) {
                 return self._syncFromCache(savedSync);
             }
+        }).catch(err => {
+            logger.error("Getting saved sync failed", err);
         });
         // Now start the first incremental sync request: this can also
         // take a while so if we set it going now, we can wait for it
@@ -512,8 +639,8 @@ SyncApi.prototype.sync = function() {
  */
 SyncApi.prototype.stop = function() {
     debuglog("SyncApi.stop");
-    if (global.document) {
-        global.document.removeEventListener("online", this._onOnlineBound, false);
+    if (global.window) {
+        global.window.removeEventListener("online", this._onOnlineBound, false);
         this._onOnlineBound = undefined;
     }
     this._running = false;
@@ -556,6 +683,7 @@ SyncApi.prototype._syncFromCache = async function(savedSync) {
         oldSyncToken: null,
         nextSyncToken,
         catchingUp: false,
+        fromCache: true,
     };
 
     const data = {
@@ -569,11 +697,16 @@ SyncApi.prototype._syncFromCache = async function(savedSync) {
 
     try {
         await this._processSyncResponse(syncEventData, data);
-    } catch(e) {
-        console.error("Error processing cached sync", e.stack || e);
+    } catch (e) {
+        logger.error("Error processing cached sync", e.stack || e);
     }
 
-    this._updateSyncState("PREPARED", syncEventData);
+    // Don't emit a prepared if we've bailed because the store is invalid:
+    // in this case the client will not be usable until stopped & restarted
+    // so this would be useless and misleading.
+    if (!this._storeIsInvalid) {
+        this._updateSyncState("PREPARED", syncEventData);
+    }
 };
 
 /**
@@ -637,10 +770,13 @@ SyncApi.prototype._sync = async function(syncOptions) {
 
     try {
         await this._processSyncResponse(syncEventData, data);
-    } catch(e) {
+    } catch (e) {
         // log the exception with stack if we have it, else fall back
         // to the plain description
-        console.error("Caught /sync error", e.stack || e);
+        logger.error("Caught /sync error", e.stack || e);
+
+        // Emit the exception for client handling
+        this.client.emit("sync.unexpectedError", e);
     }
 
     // update this as it may have changed
@@ -751,11 +887,15 @@ SyncApi.prototype._onSyncError = function(err, syncOptions) {
         return;
     }
 
-    console.error("/sync error %s", err);
-    console.error(err);
+    logger.error("/sync error %s", err);
+    logger.error(err);
+
+    if (this._shouldAbortSync(err)) {
+        return;
+    }
 
     this._failedSyncCount++;
-    console.log('Number of consecutive failed sync requests:', this._failedSyncCount);
+    logger.log('Number of consecutive failed sync requests:', this._failedSyncCount);
 
     debuglog("Starting keep-alive");
     // Note that we do *not* mark the sync connection as
@@ -763,9 +903,20 @@ SyncApi.prototype._onSyncError = function(err, syncOptions) {
     // fails, since long lived HTTP connections will
     // go away sometimes and we shouldn't treat this as
     // erroneous. We set the state to 'reconnecting'
-    // instead, so that clients can onserve this state
+    // instead, so that clients can observe this state
     // if they wish.
-    this._startKeepAlives().then(() => {
+    this._startKeepAlives().then((connDidFail) => {
+        // Only emit CATCHUP if we detected a connectivity error: if we didn't,
+        // it's quite likely the sync will fail again for the same reason and we
+        // want to stay in ERROR rather than keep flip-flopping between ERROR
+        // and CATCHUP.
+        if (connDidFail && this.getSyncState() === 'ERROR') {
+            this._updateSyncState("CATCHUP", {
+                oldSyncToken: null,
+                nextSyncToken: null,
+                catchingUp: true,
+            });
+        }
         this._sync(syncOptions);
     });
 
@@ -774,6 +925,7 @@ SyncApi.prototype._onSyncError = function(err, syncOptions) {
     this._updateSyncState(
         this._failedSyncCount >= FAILED_SYNC_ERROR_THRESHOLD ?
             "ERROR" : "RECONNECTING",
+        { error: err },
     );
 };
 
@@ -809,6 +961,11 @@ SyncApi.prototype._processSyncResponse = async function(
     //          state: { events: [] },
     //          timeline: { events: [], prev_batch: $token, limited: true },
     //          ephemeral: { events: [] },
+    //          summary: {
+    //             m.heroes: [ $user_id ],
+    //             m.joined_member_count: $count,
+    //             m.invited_member_count: $count
+    //          },
     //          account_data: { events: [] },
     //          unread_notifications: {
     //              highlight_count: 0,
@@ -844,7 +1001,7 @@ SyncApi.prototype._processSyncResponse = async function(
     // - The isBrandNewRoom boilerplate is boilerplatey.
 
     // handle presence events (User objects)
-    if (data.presence && utils.isArray(data.presence.events)) {
+    if (data.presence && Array.isArray(data.presence.events)) {
         data.presence.events.map(client.getEventMapper()).forEach(
         function(presenceEvent) {
             let user = client.store.getUser(presenceEvent.getSender());
@@ -860,30 +1017,54 @@ SyncApi.prototype._processSyncResponse = async function(
     }
 
     // handle non-room account_data
-    if (data.account_data && utils.isArray(data.account_data.events)) {
+    if (data.account_data && Array.isArray(data.account_data.events)) {
         const events = data.account_data.events.map(client.getEventMapper());
+        const prevEventsMap = events.reduce((m, c) => {
+            m[c.getId()] = client.store.getAccountData(c.getType());
+            return m;
+        }, {});
         client.store.storeAccountDataEvents(events);
         events.forEach(
             function(accountDataEvent) {
                 // Honour push rules that come down the sync stream but also
                 // honour push rules that were previously cached. Base rules
-                // will be updated when we recieve push rules via getPushRules
+                // will be updated when we receive push rules via getPushRules
                 // (see SyncApi.prototype.sync) before syncing over the network.
-                if (accountDataEvent.getType() == 'm.push_rules') {
-                    client.pushRules = accountDataEvent.getContent();
+                if (accountDataEvent.getType() === 'm.push_rules') {
+                    const rules = accountDataEvent.getContent();
+                    client.pushRules = PushProcessor.rewriteDefaultRules(rules);
                 }
-                client.emit("accountData", accountDataEvent);
+                const prevEvent = prevEventsMap[accountDataEvent.getId()];
+                client.emit("accountData", accountDataEvent, prevEvent);
                 return accountDataEvent;
             },
         );
     }
 
     // handle to-device events
-    if (data.to_device && utils.isArray(data.to_device.events) &&
+    if (data.to_device && Array.isArray(data.to_device.events) &&
         data.to_device.events.length > 0
        ) {
+        const cancelledKeyVerificationTxns = [];
         data.to_device.events
             .map(client.getEventMapper())
+            .map((toDeviceEvent) => { // map is a cheap inline forEach
+                // We want to flag m.key.verification.start events as cancelled
+                // if there's an accompanying m.key.verification.cancel event, so
+                // we pull out the transaction IDs from the cancellation events
+                // so we can flag the verification events as cancelled in the loop
+                // below.
+                if (toDeviceEvent.getType() === "m.key.verification.cancel") {
+                    const txnId = toDeviceEvent.getContent()['transaction_id'];
+                    if (txnId) {
+                        cancelledKeyVerificationTxns.push(txnId);
+                    }
+                }
+
+                // as mentioned above, .map is a cheap inline forEach, so return
+                // the unmodified event.
+                return toDeviceEvent;
+            })
             .forEach(
                 function(toDeviceEvent) {
                     const content = toDeviceEvent.getContent();
@@ -892,11 +1073,19 @@ SyncApi.prototype._processSyncResponse = async function(
                             content.msgtype == "m.bad.encrypted"
                     ) {
                         // the mapper already logged a warning.
-                        console.log(
+                        logger.log(
                             'Ignoring undecryptable to-device event from ' +
                                 toDeviceEvent.getSender(),
                         );
                         return;
+                    }
+
+                    if (toDeviceEvent.getType() === "m.key.verification.start"
+                        || toDeviceEvent.getType() === "m.key.verification.request") {
+                        const txnId = content['transaction_id'];
+                        if (cancelledKeyVerificationTxns.includes(txnId)) {
+                            toDeviceEvent.flagCancelled();
+                        }
                     }
 
                     client.emit("toDeviceEvent", toDeviceEvent);
@@ -947,33 +1136,48 @@ SyncApi.prototype._processSyncResponse = async function(
         const room = inviteObj.room;
         const stateEvents =
             self._mapSyncEventsFormat(inviteObj.invite_state, room);
+
         self._processRoomEvents(room, stateEvents);
         if (inviteObj.isBrandNewRoom) {
-            room.recalculate(client.credentials.userId);
+            room.recalculate();
             client.store.storeRoom(room);
             client.emit("Room", room);
         }
         stateEvents.forEach(function(e) {
             client.emit("event", e);
         });
+        room.updateMyMembership("invite");
     });
 
     // Handle joins
-    await Promise.mapSeries(joinRooms, async function(joinObj) {
+    await utils.promiseMapSeries(joinRooms, async function(joinObj) {
         const room = joinObj.room;
         const stateEvents = self._mapSyncEventsFormat(joinObj.state, room);
-        const timelineEvents = self._mapSyncEventsFormat(joinObj.timeline, room);
+        // Prevent events from being decrypted ahead of time
+        // this helps large account to speed up faster
+        // room::decryptCriticalEvent is in charge of decrypting all the events
+        // required for a client to function properly
+        const timelineEvents = self._mapSyncEventsFormat(joinObj.timeline, room, false);
         const ephemeralEvents = self._mapSyncEventsFormat(joinObj.ephemeral);
         const accountDataEvents = self._mapSyncEventsFormat(joinObj.account_data);
 
+        const encrypted = client.isRoomEncrypted(room.roomId);
         // we do this first so it's correct when any of the events fire
         if (joinObj.unread_notifications) {
             room.setUnreadNotificationCount(
                 'total', joinObj.unread_notifications.notification_count,
             );
-            room.setUnreadNotificationCount(
-                'highlight', joinObj.unread_notifications.highlight_count,
-            );
+
+            // We track unread notifications ourselves in encrypted rooms, so don't
+            // bother setting it here. We trust our calculations better than the
+            // server's for this case, and therefore will assume that our non-zero
+            // count is accurate.
+            if (!encrypted
+                || (encrypted && room.getUnreadNotificationCount('highlight') <= 0)) {
+                room.setUnreadNotificationCount(
+                    'highlight', joinObj.unread_notifications.highlight_count,
+                );
+            }
         }
 
         joinObj.timeline = joinObj.timeline || {};
@@ -1038,17 +1242,23 @@ SyncApi.prototype._processSyncResponse = async function(
             }
         }
 
-        self._processRoomEvents(room, stateEvents, timelineEvents);
+        self._processRoomEvents(room, stateEvents,
+            timelineEvents, syncEventData.fromCache);
 
-        // XXX: should we be adding ephemeralEvents to the timeline?
-        // It feels like that for symmetry with room.addAccountData()
-        // there should be a room.addEphemeralEvents() or similar.
-        room.addLiveEvents(ephemeralEvents);
+        // set summary after processing events,
+        // because it will trigger a name calculation
+        // which needs the room state to be up to date
+        if (joinObj.summary) {
+            room.setSummary(joinObj.summary);
+        }
+
+        // we deliberately don't add ephemeral events to the timeline
+        room.addEphemeralEvents(ephemeralEvents);
 
         // we deliberately don't add accountData to the timeline
         room.addAccountData(accountDataEvents);
 
-        room.recalculate(client.credentials.userId);
+        room.recalculate();
         if (joinObj.isBrandNewRoom) {
             client.store.storeRoom(room);
             client.emit("Room", room);
@@ -1061,16 +1271,33 @@ SyncApi.prototype._processSyncResponse = async function(
             if (e.isState() && e.getType() == "m.room.encryption" && self.opts.crypto) {
                 await self.opts.crypto.onCryptoEvent(e);
             }
+            if (e.isState() && e.getType() === "im.vector.user_status") {
+                let user = client.store.getUser(e.getStateKey());
+                if (user) {
+                    user._unstable_updateStatusMessage(e);
+                } else {
+                    user = createNewUser(client, e.getStateKey());
+                    user._unstable_updateStatusMessage(e);
+                    client.store.storeUser(user);
+                }
+            }
         }
 
-        await Promise.mapSeries(stateEvents, processRoomEvent);
-        await Promise.mapSeries(timelineEvents, processRoomEvent);
+        await utils.promiseMapSeries(stateEvents, processRoomEvent);
+        await utils.promiseMapSeries(timelineEvents, processRoomEvent);
         ephemeralEvents.forEach(function(e) {
             client.emit("event", e);
         });
         accountDataEvents.forEach(function(e) {
             client.emit("event", e);
         });
+
+        room.updateMyMembership("join");
+
+        // Decrypt only the last message in all rooms to make sure we can generate a preview
+        // And decrypt all events after the recorded read receipt to ensure an accurate
+        // notification count
+        room.decryptCriticalEvents();
     });
 
     // Handle leaves (e.g. kicked rooms)
@@ -1086,7 +1313,7 @@ SyncApi.prototype._processSyncResponse = async function(
         self._processRoomEvents(room, stateEvents, timelineEvents);
         room.addAccountData(accountDataEvents);
 
-        room.recalculate(client.credentials.userId);
+        room.recalculate();
         if (leaveObj.isBrandNewRoom) {
             client.store.storeRoom(room);
             client.emit("Room", room);
@@ -1103,6 +1330,8 @@ SyncApi.prototype._processSyncResponse = async function(
         accountDataEvents.forEach(function(e) {
             client.emit("event", e);
         });
+
+        room.updateMyMembership("leave");
     });
 
     // update the notification timeline, if appropriate.
@@ -1137,6 +1366,16 @@ SyncApi.prototype._processSyncResponse = async function(
         const currentCount = data.device_one_time_keys_count.signed_curve25519 || 0;
         this.opts.crypto.updateOneTimeKeyCount(currentCount);
     }
+    if (this.opts.crypto && data["org.matrix.msc2732.device_unused_fallback_key_types"]) {
+        // The presence of device_unused_fallback_key_types indicates that the
+        // server supports fallback keys. If there's no unused
+        // signed_curve25519 fallback key we need a new one.
+        const unusedFallbackKeys = data["org.matrix.msc2732.device_unused_fallback_key_types"];
+        this.opts.crypto.setNeedsNewFallback(
+            unusedFallbackKeys instanceof Array &&
+            !unusedFallbackKeys.includes("signed_curve25519"),
+        );
+    }
 };
 
 /**
@@ -1164,7 +1403,7 @@ SyncApi.prototype._startKeepAlives = function(delay) {
         self._pokeKeepAlive();
     }
     if (!this._connectionReturnedDefer) {
-        this._connectionReturnedDefer = Promise.defer();
+        this._connectionReturnedDefer = utils.defer();
     }
     return this._connectionReturnedDefer.promise;
 };
@@ -1175,13 +1414,16 @@ SyncApi.prototype._startKeepAlives = function(delay) {
  *
  * On failure, schedules a call back to itself. On success, resolves
  * this._connectionReturnedDefer.
+ *
+ * @param {bool} connDidFail True if a connectivity failure has been detected. Optional.
  */
-SyncApi.prototype._pokeKeepAlive = function() {
+SyncApi.prototype._pokeKeepAlive = function(connDidFail) {
+    if (connDidFail === undefined) connDidFail = false;
     const self = this;
     function success() {
         clearTimeout(self._keepAliveTimer);
         if (self._connectionReturnedDefer) {
-            self._connectionReturnedDefer.resolve();
+            self._connectionReturnedDefer.resolve(connDidFail);
             self._connectionReturnedDefer = null;
         }
     }
@@ -1195,10 +1437,10 @@ SyncApi.prototype._pokeKeepAlive = function() {
             prefix: '',
             localTimeoutMs: 15 * 1000,
         },
-    ).done(function() {
+    ).then(function() {
         success();
     }, function(err) {
-        if (err.httpStatus == 400) {
+        if (err.httpStatus == 400 || err.httpStatus == 404) {
             // treat this as a success because the server probably just doesn't
             // support /versions: point is, we're getting a response.
             // We wait a short time though, just in case somehow the server
@@ -1206,8 +1448,9 @@ SyncApi.prototype._pokeKeepAlive = function() {
             // responses fail, this will mean we don't hammer in a loop.
             self._keepAliveTimer = setTimeout(success, 2000);
         } else {
+            connDidFail = true;
             self._keepAliveTimer = setTimeout(
-                self._pokeKeepAlive.bind(self),
+                self._pokeKeepAlive.bind(self, connDidFail),
                 5000 + Math.floor(Math.random() * 5000),
             );
             // A keepalive has failed, so we emit the
@@ -1215,7 +1458,7 @@ SyncApi.prototype._pokeKeepAlive = function() {
             // first failure).
             // Note we do this after setting the timer:
             // this lets the unit tests advance the mock
-            // clock when the get the error.
+            // clock when they get the error.
             self._updateSyncState("ERROR", { error: err });
         }
     });
@@ -1260,7 +1503,7 @@ SyncApi.prototype._mapSyncResponseToRoomArray = function(obj) {
     // [{stuff+Room+isBrandNewRoom}, {stuff+Room+isBrandNewRoom}]
     const client = this.client;
     const self = this;
-    return utils.keys(obj).map(function(roomId) {
+    return Object.keys(obj).map(function(roomId) {
         const arrObj = obj[roomId];
         let room = client.store.getRoom(roomId);
         let isBrandNewRoom = false;
@@ -1277,13 +1520,14 @@ SyncApi.prototype._mapSyncResponseToRoomArray = function(obj) {
 /**
  * @param {Object} obj
  * @param {Room} room
+ * @param {bool} decrypt
  * @return {MatrixEvent[]}
  */
-SyncApi.prototype._mapSyncEventsFormat = function(obj, room) {
-    if (!obj || !utils.isArray(obj.events)) {
+SyncApi.prototype._mapSyncEventsFormat = function(obj, room, decrypt = true) {
+    if (!obj || !Array.isArray(obj.events)) {
         return [];
     }
-    const mapper = this.client.getEventMapper();
+    const mapper = this.client.getEventMapper({ decrypt });
     return obj.events.map(function(e) {
         if (room) {
             e.room_id = room.roomId;
@@ -1318,7 +1562,7 @@ SyncApi.prototype._resolveInvites = function(room) {
         } else {
             promise = client.getProfileInfo(member.userId);
         }
-        promise.done(function(info) {
+        promise.then(function(info) {
             // slightly naughty by doctoring the invite event but this means all
             // the code paths remain the same between invite/join display name stuff
             // which is a worthy trade-off for some minor pollution.
@@ -1342,10 +1586,11 @@ SyncApi.prototype._resolveInvites = function(room) {
  * @param {MatrixEvent[]} stateEventList A list of state events. This is the state
  * at the *START* of the timeline list if it is supplied.
  * @param {MatrixEvent[]} [timelineEventList] A list of timeline events. Lower index
+ * @param {boolean} fromCache whether the sync response came from cache
  * is earlier in time. Higher index is later.
  */
 SyncApi.prototype._processRoomEvents = function(room, stateEventList,
-                                                timelineEventList) {
+                                                timelineEventList, fromCache) {
     // If there are no events in the timeline yet, initialise it with
     // the given state events
     const liveTimeline = room.getLiveTimeline();
@@ -1376,7 +1621,7 @@ SyncApi.prototype._processRoomEvents = function(room, stateEventList,
     // a recalculation (like m.room.name) we won't recalculate until we've
     // finished adding all the events, which will cause the notification to have
     // the old room name rather than the new one.
-    room.recalculate(this.client.credentials.userId);
+    room.recalculate();
 
     // If the timeline wasn't empty, we process the state events here: they're
     // defined as updates to the state before the start of the timeline, so this
@@ -1399,7 +1644,7 @@ SyncApi.prototype._processRoomEvents = function(room, stateEventList,
     // if the timeline has any state events in it.
     // This also needs to be done before running push rules on the events as they need
     // to be decorated with sender etc.
-    room.addLiveEvents(timelineEventList || []);
+    room.addLiveEvents(timelineEventList || [], null, fromCache);
 };
 
 /**
@@ -1451,6 +1696,7 @@ SyncApi.prototype._getGuestFilter = function() {
 SyncApi.prototype._updateSyncState = function(newState, data) {
     const old = this._syncState;
     this._syncState = newState;
+    this._syncStateData = data;
     this.client.emit("sync", this._syncState, old, data);
 };
 
@@ -1474,5 +1720,3 @@ function createNewUser(client, userId) {
     return user;
 }
 
-/** */
-module.exports = SyncApi;

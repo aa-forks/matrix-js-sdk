@@ -1,5 +1,6 @@
 /*
 Copyright 2016, 2017 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,13 +14,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
 
 /**
  * @module models/event-timeline
  */
 
-const RoomState = require("./room-state");
+import {RoomState} from "./room-state";
 
 /**
  * Construct a new EventTimeline
@@ -41,7 +41,7 @@ const RoomState = require("./room-state");
  * @param {EventTimelineSet} eventTimelineSet the set of timelines this is part of
  * @constructor
  */
-function EventTimeline(eventTimelineSet) {
+export function EventTimeline(eventTimelineSet) {
     this._eventTimelineSet = eventTimelineSet;
     this._roomId = eventTimelineSet.room ? eventTimelineSet.room.roomId : null;
     this._events = [];
@@ -104,6 +104,50 @@ EventTimeline.prototype.initialiseState = function(stateEvents) {
 
     this._startState.setStateEvents(stateEvents);
     this._endState.setStateEvents(stateEvents);
+};
+
+/**
+ * Forks the (live) timeline, taking ownership of the existing directional state of this timeline.
+ * All attached listeners will keep receiving state updates from the new live timeline state.
+ * The end state of this timeline gets replaced with an independent copy of the current RoomState,
+ * and will need a new pagination token if it ever needs to paginate forwards.
+
+ * @param {string} direction   EventTimeline.BACKWARDS to get the state at the
+ *   start of the timeline; EventTimeline.FORWARDS to get the state at the end
+ *   of the timeline.
+ *
+ * @return {EventTimeline} the new timeline
+ */
+EventTimeline.prototype.forkLive = function(direction) {
+    const forkState = this.getState(direction);
+    const timeline = new EventTimeline(this._eventTimelineSet);
+    timeline._startState = forkState.clone();
+    // Now clobber the end state of the new live timeline with that from the
+    // previous live timeline. It will be identical except that we'll keep
+    // using the same RoomMember objects for the 'live' set of members with any
+    // listeners still attached
+    timeline._endState = forkState;
+    // Firstly, we just stole the current timeline's end state, so it needs a new one.
+    // Make an immutable copy of the state so back pagination will get the correct sentinels.
+    this._endState = forkState.clone();
+    return timeline;
+};
+
+/**
+ * Creates an independent timeline, inheriting the directional state from this timeline.
+ *
+ * @param {string} direction   EventTimeline.BACKWARDS to get the state at the
+ *   start of the timeline; EventTimeline.FORWARDS to get the state at the end
+ *   of the timeline.
+ *
+ * @return {EventTimeline} the new timeline
+ */
+EventTimeline.prototype.fork = function(direction) {
+    const forkState = this.getState(direction);
+    const timeline = new EventTimeline(this._eventTimelineSet);
+    timeline._startState = forkState.clone();
+    timeline._endState = forkState.clone();
+    return timeline;
 };
 
 /**
@@ -232,7 +276,7 @@ EventTimeline.prototype.getNeighbouringTimeline = function(direction) {
 EventTimeline.prototype.setNeighbouringTimeline = function(neighbour, direction) {
     if (this.getNeighbouringTimeline(direction)) {
         throw new Error("timeline already has a neighbouring timeline - " +
-                        "cannot reset neighbour");
+                        "cannot reset neighbour (direction: " + direction + ")");
     }
 
     if (direction == EventTimeline.BACKWARDS) {
@@ -352,8 +396,3 @@ EventTimeline.prototype.toString = function() {
     return this._name;
 };
 
-
-/**
- * The EventTimeline class
- */
-module.exports = EventTimeline;

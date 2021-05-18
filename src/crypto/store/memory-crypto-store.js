@@ -1,6 +1,7 @@
 /*
 Copyright 2017 Vector Creations Ltd
 Copyright 2018 New Vector Ltd
+Copyright 2020 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,9 +16,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import Promise from 'bluebird';
-
-import utils from '../../utils';
+import {logger} from '../../logger';
+import * as utils from "../../utils";
 
 /**
  * Internal module. in-memory storage for e2e.
@@ -28,19 +28,43 @@ import utils from '../../utils';
 /**
  * @implements {module:crypto/store/base~CryptoStore}
  */
-export default class MemoryCryptoStore {
+export class MemoryCryptoStore {
     constructor() {
         this._outgoingRoomKeyRequests = [];
         this._account = null;
+        this._crossSigningKeys = null;
+        this._privateKeys = {};
+        this._backupKeys = {};
 
         // Map of {devicekey -> {sessionId -> session pickle}}
         this._sessions = {};
+        // Map of {devicekey -> array of problems}
+        this._sessionProblems = {};
+        // Map of {userId -> deviceId -> true}
+        this._notifiedErrorDevices = {};
         // Map of {senderCurve25519Key+'/'+sessionId -> session data object}
         this._inboundGroupSessions = {};
+        this._inboundGroupSessionsWithheld = {};
         // Opaque device data object
         this._deviceData = null;
         // roomId -> Opaque roomInfo object
         this._rooms = {};
+        // Set of {senderCurve25519Key+'/'+sessionId}
+        this._sessionsNeedingBackup = {};
+        // roomId -> array of [senderKey, sessionId]
+        this._sharedHistoryInboundGroupSessions = {};
+    }
+
+    /**
+     * Ensure the database exists and is up-to-date.
+     *
+     * This must be called before the store can be used.
+     *
+     * @return {Promise} resolves to the store.
+     */
+    async startup() {
+        // No startup work to do for the memory store.
+        return this;
     }
 
     /**
@@ -65,13 +89,13 @@ export default class MemoryCryptoStore {
     getOrAddOutgoingRoomKeyRequest(request) {
         const requestBody = request.requestBody;
 
-        return Promise.try(() => {
+        return utils.promiseTry(() => {
             // first see if we already have an entry for this request.
             const existing = this._getOutgoingRoomKeyRequest(requestBody);
 
             if (existing) {
                 // this entry matches the request - return it.
-                console.log(
+                logger.log(
                     `already have key request outstanding for ` +
                     `${requestBody.room_id} / ${requestBody.session_id}: ` +
                     `not sending another`,
@@ -81,7 +105,7 @@ export default class MemoryCryptoStore {
 
             // we got to the end of the list without finding a match
             // - add the new request.
-            console.log(
+            logger.log(
                 `enqueueing key request for ${requestBody.room_id} / ` +
                 requestBody.session_id,
             );
@@ -145,6 +169,32 @@ export default class MemoryCryptoStore {
     }
 
     /**
+     *
+     * @param {Number} wantedState
+     * @return {Promise<Array<*>>} All OutgoingRoomKeyRequests in state
+     */
+    getAllOutgoingRoomKeyRequestsByState(wantedState) {
+        return Promise.resolve(
+            this._outgoingRoomKeyRequests.filter(
+                (r) => r.state == wantedState,
+            ),
+        );
+    }
+
+    getOutgoingRoomKeyRequestsByTarget(userId, deviceId, wantedStates) {
+        const results = [];
+
+        for (const req of this._outgoingRoomKeyRequests) {
+            for (const state of wantedStates) {
+                if (req.state === state && req.recipients.includes({userId, deviceId})) {
+                    results.push(req);
+                }
+            }
+        }
+        return Promise.resolve(results);
+    }
+
+    /**
      * Look for an existing room key request by id and state, and update it if
      * found
      *
@@ -163,7 +213,7 @@ export default class MemoryCryptoStore {
             }
 
             if (req.state != expectedState) {
-                console.warn(
+                logger.warn(
                     `Cannot update room key request from ${expectedState} ` +
                     `as it was already updated to ${req.state}`,
                 );
@@ -194,7 +244,7 @@ export default class MemoryCryptoStore {
             }
 
             if (req.state != expectedState) {
-                console.warn(
+                logger.warn(
                     `Cannot delete room key request in state ${req.state} `
                     + `(expected ${expectedState})`,
                 );
@@ -218,6 +268,23 @@ export default class MemoryCryptoStore {
         this._account = newData;
     }
 
+    getCrossSigningKeys(txn, func) {
+        func(this._crossSigningKeys);
+    }
+
+    getSecretStorePrivateKey(txn, func, type) {
+        const result = this._privateKeys[type];
+        return func(result || null);
+    }
+
+    storeCrossSigningKeys(txn, keys) {
+        this._crossSigningKeys = keys;
+    }
+
+    storeSecretStorePrivateKey(txn, type, key) {
+        this._privateKeys[type] = key;
+    }
+
     // Olm Sessions
 
     countEndToEndSessions(txn, func) {
@@ -233,19 +300,82 @@ export default class MemoryCryptoStore {
         func(this._sessions[deviceKey] || {});
     }
 
-    storeEndToEndSession(deviceKey, sessionId, session, txn) {
+    getAllEndToEndSessions(txn, func) {
+        Object.entries(this._sessions).forEach(([deviceKey, deviceSessions]) => {
+            Object.entries(deviceSessions).forEach(([sessionId, session]) => {
+                func({
+                    ...session,
+                    deviceKey,
+                    sessionId,
+                });
+            });
+        });
+    }
+
+    storeEndToEndSession(deviceKey, sessionId, sessionInfo, txn) {
         let deviceSessions = this._sessions[deviceKey];
         if (deviceSessions === undefined) {
             deviceSessions = {};
             this._sessions[deviceKey] = deviceSessions;
         }
-        deviceSessions[sessionId] = session;
+        deviceSessions[sessionId] = sessionInfo;
+    }
+
+    async storeEndToEndSessionProblem(deviceKey, type, fixed) {
+        const problems = this._sessionProblems[deviceKey]
+              = this._sessionProblems[deviceKey] || [];
+        problems.push({type, fixed, time: Date.now()});
+        problems.sort((a, b) => {
+            return a.time - b.time;
+        });
+    }
+
+    async getEndToEndSessionProblem(deviceKey, timestamp) {
+        const problems = this._sessionProblems[deviceKey] || [];
+        if (!problems.length) {
+            return null;
+        }
+        const lastProblem = problems[problems.length - 1];
+        for (const problem of problems) {
+            if (problem.time > timestamp) {
+                return Object.assign({}, problem, {fixed: lastProblem.fixed});
+            }
+        }
+        if (lastProblem.fixed) {
+            return null;
+        } else {
+            return lastProblem;
+        }
+    }
+
+    async filterOutNotifiedErrorDevices(devices) {
+        const notifiedErrorDevices = this._notifiedErrorDevices;
+        const ret = [];
+
+        for (const device of devices) {
+            const {userId, deviceInfo} = device;
+            if (userId in notifiedErrorDevices) {
+                if (!(deviceInfo.deviceId in notifiedErrorDevices[userId])) {
+                    ret.push(device);
+                    notifiedErrorDevices[userId][deviceInfo.deviceId] = true;
+                }
+            } else {
+                ret.push(device);
+                notifiedErrorDevices[userId] = {[deviceInfo.deviceId]: true };
+            }
+        }
+
+        return ret;
     }
 
     // Inbound Group Sessions
 
     getEndToEndInboundGroupSession(senderCurve25519Key, sessionId, txn, func) {
-        func(this._inboundGroupSessions[senderCurve25519Key+'/'+sessionId] || null);
+        const k = senderCurve25519Key+'/'+sessionId;
+        func(
+            this._inboundGroupSessions[k] || null,
+            this._inboundGroupSessionsWithheld[k] || null,
+        );
     }
 
     getAllEndToEndInboundGroupSessions(txn, func) {
@@ -275,6 +405,13 @@ export default class MemoryCryptoStore {
         this._inboundGroupSessions[senderCurve25519Key+'/'+sessionId] = sessionData;
     }
 
+    storeEndToEndInboundGroupSessionWithheld(
+        senderCurve25519Key, sessionId, sessionData, txn,
+    ) {
+        const k = senderCurve25519Key+'/'+sessionId;
+        this._inboundGroupSessionsWithheld[k] = sessionData;
+    }
+
     // Device Data
 
     getEndToEndDeviceData(txn, func) {
@@ -294,6 +431,55 @@ export default class MemoryCryptoStore {
     getEndToEndRooms(txn, func) {
         func(this._rooms);
     }
+
+    getSessionsNeedingBackup(limit) {
+        const sessions = [];
+        for (const session in this._sessionsNeedingBackup) {
+            if (this._inboundGroupSessions[session]) {
+                sessions.push({
+                    senderKey: session.substr(0, 43),
+                    sessionId: session.substr(44),
+                    sessionData: this._inboundGroupSessions[session],
+                });
+                if (limit && session.length >= limit) {
+                    break;
+                }
+            }
+        }
+        return Promise.resolve(sessions);
+    }
+
+    countSessionsNeedingBackup() {
+        return Promise.resolve(Object.keys(this._sessionsNeedingBackup).length);
+    }
+
+    unmarkSessionsNeedingBackup(sessions) {
+        for (const session of sessions) {
+            const sessionKey = session.senderKey + '/' + session.sessionId;
+            delete this._sessionsNeedingBackup[sessionKey];
+        }
+        return Promise.resolve();
+    }
+
+    markSessionsNeedingBackup(sessions) {
+        for (const session of sessions) {
+            const sessionKey = session.senderKey + '/' + session.sessionId;
+            this._sessionsNeedingBackup[sessionKey] = true;
+        }
+        return Promise.resolve();
+    }
+
+    addSharedHistoryInboundGroupSession(roomId, senderKey, sessionId) {
+        const sessions = this._sharedHistoryInboundGroupSessions[roomId] || [];
+        sessions.push([senderKey, sessionId]);
+        this._sharedHistoryInboundGroupSessions[roomId] = sessions;
+    }
+
+    getSharedHistoryInboundGroupSessions(roomId) {
+        return Promise.resolve(this._sharedHistoryInboundGroupSessions[roomId] || []);
+    }
+
+    // Session key backups
 
     doTxn(mode, stores, func) {
         return Promise.resolve(func(null));

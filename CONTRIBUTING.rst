@@ -24,20 +24,27 @@ works. Develop is the unstable branch where all the development actually
 happens: the workflow is that contributors should fork the develop branch to
 make a 'feature' branch for a particular contribution, and then make a pull
 request to merge this back into the matrix.org 'official' develop branch. We
-use github's pull request workflow to review the contribution, and either ask
+use GitHub's pull request workflow to review the contribution, and either ask
 you to make any refinements needed or merge it and make them ourselves. The
 changes will then land on master when we next do a release.
 
-We use Travis for continuous integration, and all pull requests get
-automatically tested by Travis: if your change breaks the build, then the PR
-will show that there are failed checks, so please check back after a few
-minutes.
+We use continuous integration, and all pull requests get automatically tested:
+if your change breaks the build, then the PR will show that there are failed
+checks, so please check back after a few minutes.
 
 Code style
 ~~~~~~~~~~
 
-The code-style for matrix-js-sdk is not formally documented, but contributors
-are encouraged to read the code style document for matrix-react-sdk
+The js-sdk aims to target TypeScript/ES6. All new files should be written in
+TypeScript and existing files should use ES6 principles where possible.
+
+Members should not be exported as a default export in general - it causes problems
+with the architecture of the SDK (index file becomes less clear) and could
+introduce naming problems (as default exports get aliased upon import). In
+general, avoid using `export default`.
+
+The remaining code-style for matrix-js-sdk is not formally documented, but
+contributors are encouraged to read the code style document for matrix-react-sdk
 (`<https://github.com/matrix-org/matrix-react-sdk/blob/master/code_style.md>`_)
 and follow the principles set out there.
 
@@ -60,8 +67,8 @@ Sign off
 ~~~~~~~~
 
 In order to have a concrete record that your contribution is intentional
-and you agree to license it under the same terms as the project's license, we've adopted the
-same lightweight approach that the Linux Kernel
+and you agree to license it under the same terms as the project's license, we've
+adopted the same lightweight approach that the Linux Kernel
 (https://www.kernel.org/doc/Documentation/SubmittingPatches), Docker
 (https://github.com/docker/docker/blob/master/CONTRIBUTING.md), and many other
 projects use: the DCO (Developer Certificate of Origin:
@@ -109,7 +116,16 @@ include the line in your commit or pull request comment::
 
     Signed-off-by: Your Name <your@email.example.org>
 
-...using your real name; unfortunately pseudonyms and anonymous contributions
-can't be accepted. Git makes this trivial - just use the -s flag when you do
-``git commit``, having first set ``user.name`` and ``user.email`` git configs
-(which you should have done anyway :)
+We accept contributions under a legally identifiable name, such as your name on
+government documentation or common-law names (names claimed by legitimate usage
+or repute). Unfortunately, we cannot accept anonymous contributions at this
+time.
+
+Git allows you to add this signoff automatically when using the ``-s`` flag to
+``git commit``, which uses the name and email set in your ``user.name`` and
+``user.email`` git configs.
+
+If you forgot to sign off your commits before making your pull request and are
+on Git 2.17+ you can mass signoff using rebase::
+
+    git rebase --signoff origin/develop

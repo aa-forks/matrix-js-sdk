@@ -1,5 +1,6 @@
 /*
 Copyright 2016 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,15 +15,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-"use strict";
-
-const anotherjson = require('another-json');
-import Promise from 'bluebird';
-import expect from 'expect';
-
-const utils = require('../../lib/utils');
-const testUtils = require('../test-utils');
-const TestClient = require('../TestClient').default;
+import anotherjson from "another-json";
+import * as testUtils from "../test-utils";
+import {TestClient} from "../TestClient";
+import {logger} from "../../src/logger";
 
 const ROOM_ID = "!room:id";
 
@@ -35,7 +31,7 @@ const ROOM_ID = "!room:id";
  */
 function createOlmSession(olmAccount, recipientTestClient) {
     return recipientTestClient.awaitOneTimeKeyUpload().then((keys) => {
-        const otkId = utils.keys(keys)[0];
+        const otkId = Object.keys(keys)[0];
         const otk = keys[otkId];
 
         const session = new global.Olm.Session();
@@ -203,7 +199,7 @@ function getSyncResponse(roomMembers) {
 
 describe("megolm", function() {
     if (!global.Olm) {
-        console.warn('not running megolm tests: Olm not present');
+        logger.warn('not running megolm tests: Olm not present');
         return;
     }
     const Olm = global.Olm;
@@ -260,7 +256,7 @@ describe("megolm", function() {
         const testOneTimeKeys = JSON.parse(testOlmAccount.one_time_keys());
         testOlmAccount.mark_keys_as_published();
 
-        const keyId = utils.keys(testOneTimeKeys.curve25519)[0];
+        const keyId = Object.keys(testOneTimeKeys.curve25519)[0];
         const oneTimeKey = testOneTimeKeys.curve25519[keyId];
         const keyResult = {
             'key': oneTimeKey,
@@ -282,8 +278,6 @@ describe("megolm", function() {
     }
 
     beforeEach(async function() {
-        testUtils.beforeEach(this); // eslint-disable-line no-invalid-this
-
         aliceTestClient = new TestClient(
             "@alice:localhost", "xzcvb", "akjgkrgjs",
         );
@@ -296,7 +290,7 @@ describe("megolm", function() {
     });
 
     afterEach(function() {
-        aliceTestClient.stop();
+        return aliceTestClient.stop();
     });
 
     it("Alice receives a megolm message", function() {
@@ -351,7 +345,7 @@ describe("megolm", function() {
     });
 
     it("Alice receives a megolm message before the session keys", function() {
-        // https://github.com/vector-im/riot-web/issues/2273
+        // https://github.com/vector-im/element-web/issues/2273
         let roomKeyEncrypted;
 
         return aliceTestClient.start().then(() => {
@@ -416,7 +410,7 @@ describe("megolm", function() {
 
             return new Promise((resolve, reject) => {
                 event.once('Event.decrypted', (ev) => {
-                    console.log(`${Date.now()} event ${event.getId()} now decrypted`);
+                    logger.log(`${Date.now()} event ${event.getId()} now decrypted`);
                     resolve(ev);
                 });
             });
@@ -489,8 +483,9 @@ describe("megolm", function() {
             return aliceTestClient.flushSync().then(() => {
                 return aliceTestClient.flushSync();
             });
-        }).then(function() {
+        }).then(async function() {
             const room = aliceTestClient.client.getRoom(ROOM_ID);
+            await room.decryptCriticalEvents();
             const event = room.getLiveTimeline().getEvents()[0];
             expect(event.getContent().body).toEqual('42');
         });
@@ -499,6 +494,7 @@ describe("megolm", function() {
     it('Alice sends a megolm message', function() {
         let p2pSession;
 
+        aliceTestClient.expectKeyQuery({device_keys: {'@alice:localhost': {}}});
         return aliceTestClient.start().then(() => {
             // establish an olm session with alice
             return createOlmSession(testOlmAccount, aliceTestClient);
@@ -554,7 +550,7 @@ describe("megolm", function() {
             ).respond(200, function(path, content) {
                 const ct = content.ciphertext;
                 const r = inboundGroupSession.decrypt(ct);
-                console.log('Decrypted received megolm message', r);
+                logger.log('Decrypted received megolm message', r);
 
                 expect(r.message_index).toEqual(0);
                 const decrypted = JSON.parse(r.plaintext);
@@ -581,6 +577,7 @@ describe("megolm", function() {
     });
 
     it("We shouldn't attempt to send to blocked devices", function() {
+        aliceTestClient.expectKeyQuery({device_keys: {'@alice:localhost': {}}});
         return aliceTestClient.start().then(() => {
             // establish an olm session with alice
             return createOlmSession(testOlmAccount, aliceTestClient);
@@ -598,7 +595,7 @@ describe("megolm", function() {
 
             return aliceTestClient.flushSync();
         }).then(function() {
-            console.log('Forcing alice to download our device keys');
+            logger.log('Forcing alice to download our device keys');
 
             aliceTestClient.httpBackend.when('POST', '/keys/query').respond(
                 200, getTestKeysQueryResponse('@bob:xyz'),
@@ -609,15 +606,18 @@ describe("megolm", function() {
                 aliceTestClient.httpBackend.flush('/keys/query', 1),
             ]);
         }).then(function() {
-            console.log('Telling alice to block our device');
+            logger.log('Telling alice to block our device');
             aliceTestClient.client.setDeviceBlocked('@bob:xyz', 'DEVICE_ID');
 
-            console.log('Telling alice to send a megolm message');
+            logger.log('Telling alice to send a megolm message');
             aliceTestClient.httpBackend.when(
                 'PUT', '/send/',
             ).respond(200, {
                 event_id: '$event_id',
             });
+            aliceTestClient.httpBackend.when(
+                'PUT', '/sendToDevice/org.matrix.room_key.withheld/',
+            ).respond(200, {});
 
             return Promise.all([
                 aliceTestClient.client.sendTextMessage(ROOM_ID, 'test'),
@@ -634,6 +634,7 @@ describe("megolm", function() {
         let p2pSession;
         let megolmSessionId;
 
+        aliceTestClient.expectKeyQuery({device_keys: {'@alice:localhost': {}}});
         return aliceTestClient.start().then(() => {
             // establish an olm session with alice
             return createOlmSession(testOlmAccount, aliceTestClient);
@@ -653,7 +654,7 @@ describe("megolm", function() {
 
             return aliceTestClient.flushSync();
         }).then(function() {
-            console.log("Fetching bob's devices and marking known");
+            logger.log("Fetching bob's devices and marking known");
 
             aliceTestClient.httpBackend.when('POST', '/keys/query').respond(
                 200, getTestKeysQueryResponse('@bob:xyz'),
@@ -666,17 +667,17 @@ describe("megolm", function() {
                 aliceTestClient.client.setDeviceKnown('@bob:xyz', 'DEVICE_ID');
             });
         }).then(function() {
-            console.log('Telling alice to send a megolm message');
+            logger.log('Telling alice to send a megolm message');
 
             aliceTestClient.httpBackend.when(
                 'PUT', '/sendToDevice/m.room.encrypted/',
             ).respond(200, function(path, content) {
-                console.log('sendToDevice: ', content);
+                logger.log('sendToDevice: ', content);
                 const m = content.messages['@bob:xyz'].DEVICE_ID;
                 const ct = m.ciphertext[testSenderKey];
                 expect(ct.type).toEqual(1); // normal message
                 const decrypted = JSON.parse(p2pSession.decrypt(ct.type, ct.body));
-                console.log('decrypted sendToDevice:', decrypted);
+                logger.log('decrypted sendToDevice:', decrypted);
                 expect(decrypted.type).toEqual('m.room_key');
                 megolmSessionId = decrypted.content.session_id;
                 return {};
@@ -685,7 +686,7 @@ describe("megolm", function() {
             aliceTestClient.httpBackend.when(
                 'PUT', '/send/',
             ).respond(200, function(path, content) {
-                console.log('/send:', content);
+                logger.log('/send:', content);
                 expect(content.session_id).toEqual(megolmSessionId);
                 return {
                     event_id: '$event_id',
@@ -701,19 +702,22 @@ describe("megolm", function() {
                 }),
             ]);
         }).then(function() {
-            console.log('Telling alice to block our device');
+            logger.log('Telling alice to block our device');
             aliceTestClient.client.setDeviceBlocked('@bob:xyz', 'DEVICE_ID');
 
-            console.log('Telling alice to send another megolm message');
+            logger.log('Telling alice to send another megolm message');
             aliceTestClient.httpBackend.when(
                 'PUT', '/send/',
             ).respond(200, function(path, content) {
-                console.log('/send:', content);
-                expect(content.session_id).toNotEqual(megolmSessionId);
+                logger.log('/send:', content);
+                expect(content.session_id).not.toEqual(megolmSessionId);
                 return {
                     event_id: '$event_id',
                 };
             });
+            aliceTestClient.httpBackend.when(
+                'PUT', '/sendToDevice/org.matrix.room_key.withheld/',
+            ).respond(200, {});
 
             return Promise.all([
                 aliceTestClient.client.sendTextMessage(ROOM_ID, 'test2'),
@@ -722,7 +726,7 @@ describe("megolm", function() {
         });
     });
 
-    // https://github.com/vector-im/riot-web/issues/2676
+    // https://github.com/vector-im/element-web/issues/2676
     it("Alice should send to her other devices", function() {
         // for this test, we make the testOlmAccount be another of Alice's devices.
         // it ought to get included in messages Alice sends.
@@ -789,7 +793,7 @@ describe("megolm", function() {
             aliceTestClient.httpBackend.when(
                 'PUT', '/sendToDevice/m.room.encrypted/',
             ).respond(200, function(path, content) {
-                console.log("sendToDevice: ", content);
+                logger.log("sendToDevice: ", content);
                 const m = content.messages[aliceTestClient.userId].DEVICE_ID;
                 const ct = m.ciphertext[testSenderKey];
                 expect(ct.type).toEqual(0); // pre-key message
@@ -809,7 +813,7 @@ describe("megolm", function() {
             ).respond(200, function(path, content) {
                 const ct = content.ciphertext;
                 const r = inboundGroupSession.decrypt(ct);
-                console.log('Decrypted received megolm message', r);
+                logger.log('Decrypted received megolm message', r);
                 decrypted = JSON.parse(r.plaintext);
 
                 return {
@@ -817,8 +821,14 @@ describe("megolm", function() {
                 };
             });
 
+            // Grab the event that we'll need to resend
+            const room = aliceTestClient.client.getRoom(ROOM_ID);
+            const pendingEvents = room.getPendingEvents();
+            expect(pendingEvents.length).toEqual(1);
+            const unsentEvent = pendingEvents[0];
+
             return Promise.all([
-                aliceTestClient.client.sendTextMessage(ROOM_ID, 'test'),
+                aliceTestClient.client.resendEvent(unsentEvent, room),
 
                 // the crypto stuff can take a while, so give the requests a whole second.
                 aliceTestClient.httpBackend.flushAllExpected({
@@ -837,6 +847,7 @@ describe("megolm", function() {
         let downloadPromise;
         let sendPromise;
 
+        aliceTestClient.expectKeyQuery({device_keys: {'@alice:localhost': {}}});
         return aliceTestClient.start().then(() => {
             // establish an olm session with alice
             return createOlmSession(testOlmAccount, aliceTestClient);
@@ -855,7 +866,7 @@ describe("megolm", function() {
             return aliceTestClient.flushSync();
         }).then(function() {
             // this will block
-            console.log('Forcing alice to download our device keys');
+            logger.log('Forcing alice to download our device keys');
             downloadPromise = aliceTestClient.client.downloadKeys(['@bob:xyz']);
 
             // so will this.
@@ -880,6 +891,7 @@ describe("megolm", function() {
     it("Alice exports megolm keys and imports them to a new device", function() {
         let messageEncrypted;
 
+        aliceTestClient.expectKeyQuery({device_keys: {'@alice:localhost': {}}});
         return aliceTestClient.start().then(() => {
             // establish an olm session with alice
             return createOlmSession(testOlmAccount, aliceTestClient);
@@ -921,8 +933,9 @@ describe("megolm", function() {
 
             aliceTestClient.httpBackend.when("GET", "/sync").respond(200, syncResponse);
             return aliceTestClient.flushSync();
-        }).then(function() {
+        }).then(async function() {
             const room = aliceTestClient.client.getRoom(ROOM_ID);
+            await room.decryptCriticalEvents();
             const event = room.getLiveTimeline().getEvents()[0];
             expect(event.getContent().body).toEqual('42');
 
@@ -957,6 +970,62 @@ describe("megolm", function() {
             const room = aliceTestClient.client.getRoom(ROOM_ID);
             const event = room.getLiveTimeline().getEvents()[0];
             expect(event.getContent().body).toEqual('42');
+        });
+    });
+
+    it("Alice receives an untrusted megolm key, only to receive the trusted one shortly after", function() {
+        const testClient = new TestClient(
+            "@alice:localhost", "device2", "access_token2",
+        );
+        const groupSession = new Olm.OutboundGroupSession();
+        groupSession.create();
+        const inboundGroupSession = new Olm.InboundGroupSession();
+        inboundGroupSession.create(groupSession.session_key());
+        const rawEvent = encryptMegolmEvent({
+            senderKey: testSenderKey,
+            groupSession: groupSession,
+            room_id: ROOM_ID,
+        });
+        return testClient.client.initCrypto().then(() => {
+            const keys = [{
+                room_id: ROOM_ID,
+                algorithm: 'm.megolm.v1.aes-sha2',
+                session_id: groupSession.session_id(),
+                session_key: inboundGroupSession.export_session(0),
+                sender_key: testSenderKey,
+            }];
+            return testClient.client.importRoomKeys(keys, { untrusted: true });
+        }).then(() => {
+            const event = testUtils.mkEvent({
+                event: true,
+                ...rawEvent,
+                room: ROOM_ID,
+            });
+            return event.attemptDecryption(testClient.client._crypto, true).then(() => {
+                expect(event.isKeySourceUntrusted()).toBeTruthy();
+            });
+        }).then(() => {
+            const event = testUtils.mkEvent({
+                type: 'm.room_key',
+                content: {
+                    room_id: ROOM_ID,
+                    algorithm: 'm.megolm.v1.aes-sha2',
+                    session_id: groupSession.session_id(),
+                    session_key: groupSession.session_key(),
+                },
+                event: true,
+            });
+            event._senderCurve25519Key = testSenderKey;
+            return testClient.client._crypto._onRoomKeyEvent(event);
+        }).then(() => {
+            const event = testUtils.mkEvent({
+                event: true,
+                ...rawEvent,
+                room: ROOM_ID,
+            });
+            return event.attemptDecryption(testClient.client._crypto, true).then(() => {
+                expect(event.isKeySourceUntrusted()).toBeFalsy();
+            });
         });
     });
 });

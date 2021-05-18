@@ -1,12 +1,8 @@
-"use strict";
-import 'source-map-support/register';
-import Promise from 'bluebird';
-const sdk = require("../..");
-const MatrixClient = sdk.MatrixClient;
-const utils = require("../test-utils");
+import {logger} from "../../src/logger";
+import {MatrixClient} from "../../src/client";
+import {Filter} from "../../src/filter";
 
-import expect from 'expect';
-import lolex from 'lolex';
+jest.useFakeTimers();
 
 describe("MatrixClient", function() {
     const userId = "@alice:bar";
@@ -15,7 +11,6 @@ describe("MatrixClient", function() {
     let client;
     let store;
     let scheduler;
-    let clock;
 
     const KEEP_ALIVE_PATH = "/_matrix/client/versions";
 
@@ -69,7 +64,7 @@ describe("MatrixClient", function() {
             "MatrixClient[UT] RECV " + method + " " + path + "  " +
             "EXPECT " + (next ? next.method : next) + " " + (next ? next.path : next)
         );
-        console.log(logLine);
+        logger.log(logLine);
 
         if (!next) { // no more things to return
             if (pendingLookup) {
@@ -84,14 +79,14 @@ describe("MatrixClient", function() {
                 );
             }
             pendingLookup = {
-                promise: Promise.defer().promise,
+                promise: new Promise(() => {}),
                 method: method,
                 path: path,
             };
             return pendingLookup.promise;
         }
         if (next.path === path && next.method === method) {
-            console.log(
+            logger.log(
                 "MatrixClient[UT] Matched. Returning " +
                 (next.error ? "BAD" : "GOOD") + " response",
             );
@@ -120,25 +115,26 @@ describe("MatrixClient", function() {
             return Promise.resolve(next.data);
         }
         expect(true).toBe(false, "Expected different request. " + logLine);
-        return Promise.defer().promise;
+        return new Promise(() => {});
     }
 
     beforeEach(function() {
-        utils.beforeEach(this); // eslint-disable-line no-invalid-this
-        clock = lolex.install();
         scheduler = [
             "getQueueForEvent", "queueEvent", "removeEventFromQueue",
             "setProcessFunction",
-        ].reduce((r, k) => { r[k] = expect.createSpy(); return r; }, {});
+        ].reduce((r, k) => { r[k] = jest.fn(); return r; }, {});
         store = [
             "getRoom", "getRooms", "getUser", "getSyncToken", "scrollback",
             "save", "wantsSave", "setSyncToken", "storeEvents", "storeRoom", "storeUser",
             "getFilterIdByName", "setFilterIdByName", "getFilter", "storeFilter",
             "getSyncAccumulator", "startup", "deleteAllData",
-        ].reduce((r, k) => { r[k] = expect.createSpy(); return r; }, {});
-        store.getSavedSync = expect.createSpy().andReturn(Promise.resolve(null));
-        store.getSavedSyncToken = expect.createSpy().andReturn(Promise.resolve(null));
-        store.setSyncData = expect.createSpy().andReturn(Promise.resolve(null));
+        ].reduce((r, k) => { r[k] = jest.fn(); return r; }, {});
+        store.getSavedSync = jest.fn().mockReturnValue(Promise.resolve(null));
+        store.getSavedSyncToken = jest.fn().mockReturnValue(Promise.resolve(null));
+        store.setSyncData = jest.fn().mockReturnValue(Promise.resolve(null));
+        store.getClientOptions = jest.fn().mockReturnValue(Promise.resolve(null));
+        store.storeClientOptions = jest.fn().mockReturnValue(Promise.resolve(null));
+        store.isNewlyCreated = jest.fn().mockReturnValue(Promise.resolve(true));
         client = new MatrixClient({
             baseUrl: "https://my.home.server",
             idBaseUrl: identityServerUrl,
@@ -150,13 +146,10 @@ describe("MatrixClient", function() {
         });
         // FIXME: We shouldn't be yanking _http like this.
         client._http = [
-            "authedRequest", "authedRequestWithPrefix", "getContentUri",
-            "request", "requestWithPrefix", "uploadContent",
-        ].reduce((r, k) => { r[k] = expect.createSpy(); return r; }, {});
-        client._http.authedRequest.andCall(httpReq);
-        client._http.authedRequestWithPrefix.andCall(httpReq);
-        client._http.requestWithPrefix.andCall(httpReq);
-        client._http.request.andCall(httpReq);
+            "authedRequest", "getContentUri", "request", "uploadContent",
+        ].reduce((r, k) => { r[k] = jest.fn(); return r; }, {});
+        client._http.authedRequest.mockImplementation(httpReq);
+        client._http.request.mockImplementation(httpReq);
 
         // set reasonable working defaults
         acceptKeepalives = true;
@@ -168,38 +161,38 @@ describe("MatrixClient", function() {
     });
 
     afterEach(function() {
-        clock.uninstall();
         // need to re-stub the requests with NOPs because there are no guarantees
         // clients from previous tests will be GC'd before the next test. This
         // means they may call /events and then fail an expect() which will fail
         // a DIFFERENT test (pollution between tests!) - we return unresolved
         // promises to stop the client from continuing to run.
-        client._http.authedRequest.andCall(function() {
-            return Promise.defer().promise;
-        });
-        client._http.authedRequestWithPrefix.andCall(function() {
-            return Promise.defer().promise;
+        client._http.authedRequest.mockImplementation(function() {
+            return new Promise(() => {});
         });
     });
 
-    it("should not POST /filter if a matching filter already exists", function(done) {
+    it("should not POST /filter if a matching filter already exists", async function() {
         httpLookups = [];
         httpLookups.push(PUSH_RULES_RESPONSE);
         httpLookups.push(SYNC_RESPONSE);
         const filterId = "ehfewf";
-        store.getFilterIdByName.andReturn(filterId);
-        const filter = new sdk.Filter(0, filterId);
+        store.getFilterIdByName.mockReturnValue(filterId);
+        const filter = new Filter(0, filterId);
         filter.setDefinition({"room": {"timeline": {"limit": 8}}});
-        store.getFilter.andReturn(filter);
-        client.startClient();
-
-        client.on("sync", function syncListener(state) {
-            if (state === "SYNCING") {
-                expect(httpLookups.length).toEqual(0);
-                client.removeListener("sync", syncListener);
-                done();
-            }
+        store.getFilter.mockReturnValue(filter);
+        const syncPromise = new Promise((resolve, reject) => {
+            client.on("sync", function syncListener(state) {
+                if (state === "SYNCING") {
+                    expect(httpLookups.length).toEqual(0);
+                    client.removeListener("sync", syncListener);
+                    resolve();
+                } else if (state === "ERROR") {
+                    reject(new Error("sync error"));
+                }
+            });
         });
+        await client.startClient();
+        await syncPromise;
     });
 
     describe("getSyncState", function() {
@@ -207,15 +200,18 @@ describe("MatrixClient", function() {
             expect(client.getSyncState()).toBe(null);
         });
 
-        it("should return the same sync state as emitted sync events", function(done) {
-            client.on("sync", function syncListener(state) {
-                expect(state).toEqual(client.getSyncState());
-                if (state === "SYNCING") {
-                    client.removeListener("sync", syncListener);
-                    done();
-                }
+        it("should return the same sync state as emitted sync events", async function() {
+            const syncingPromise = new Promise((resolve) => {
+                client.on("sync", function syncListener(state) {
+                    expect(state).toEqual(client.getSyncState());
+                    if (state === "SYNCING") {
+                        client.removeListener("sync", syncListener);
+                        resolve();
+                    }
+                });
             });
-            client.startClient();
+            await client.startClient();
+            await syncingPromise;
         });
     });
 
@@ -244,11 +240,11 @@ describe("MatrixClient", function() {
                 },
             });
             httpLookups.push(FILTER_RESPONSE);
-            store.getFilterIdByName.andReturn(invalidFilterId);
+            store.getFilterIdByName.mockReturnValue(invalidFilterId);
 
             const filterName = getFilterName(client.credentials.userId);
             client.store.setFilterIdByName(filterName, invalidFilterId);
-            const filter = new sdk.Filter(client.credentials.userId);
+            const filter = new Filter(client.credentials.userId);
 
             client.getOrCreateFilter(filterName, filter).then(function(filterId) {
                 expect(filterId).toEqual(FILTER_RESPONSE.data.filter_id);
@@ -258,8 +254,8 @@ describe("MatrixClient", function() {
     });
 
     describe("retryImmediately", function() {
-        it("should return false if there is no request waiting", function() {
-            client.startClient();
+        it("should return false if there is no request waiting", async function() {
+            await client.startClient();
             expect(client.retryImmediately()).toBe(false);
         });
 
@@ -276,7 +272,7 @@ describe("MatrixClient", function() {
                 if (state === "ERROR" && httpLookups.length > 0) {
                     expect(httpLookups.length).toEqual(2);
                     expect(client.retryImmediately()).toBe(true);
-                    clock.tick(1);
+                    jest.advanceTimersByTime(1);
                 } else if (state === "PREPARED" && httpLookups.length === 0) {
                     client.removeListener("sync", syncListener);
                     done();
@@ -302,9 +298,9 @@ describe("MatrixClient", function() {
                     expect(client.retryImmediately()).toBe(
                         true, "retryImmediately returned false",
                     );
-                    clock.tick(1);
+                    jest.advanceTimersByTime(1);
                 } else if (state === "RECONNECTING" && httpLookups.length > 0) {
-                    clock.tick(10000);
+                    jest.advanceTimersByTime(10000);
                 } else if (state === "SYNCING" && httpLookups.length === 0) {
                     client.removeListener("sync", syncListener);
                     done();
@@ -326,7 +322,7 @@ describe("MatrixClient", function() {
                 if (state === "ERROR" && httpLookups.length > 0) {
                     expect(httpLookups.length).toEqual(3);
                     expect(client.retryImmediately()).toBe(true);
-                    clock.tick(1);
+                    jest.advanceTimersByTime(1);
                 } else if (state === "PREPARED" && httpLookups.length === 0) {
                     client.removeListener("sync", syncListener);
                     done();
@@ -343,7 +339,7 @@ describe("MatrixClient", function() {
         function syncChecker(expectedStates, done) {
             return function syncListener(state, old) {
                 const expected = expectedStates.shift();
-                console.log(
+                logger.log(
                     "'sync' curr=%s old=%s EXPECT=%s", state, old, expected,
                 );
                 if (!expected) {
@@ -357,7 +353,7 @@ describe("MatrixClient", function() {
                     done();
                 }
                 // standard retry time is 5 to 10 seconds
-                clock.tick(10000);
+                jest.advanceTimersByTime(10000);
             };
         }
 
@@ -380,7 +376,7 @@ describe("MatrixClient", function() {
             client.startClient();
         });
 
-        it("should transition ERROR -> PREPARED after /sync if prev failed",
+        it("should transition ERROR -> CATCHUP after /sync if prev failed",
         function(done) {
             const expectedStates = [];
             acceptKeepalives = false;
@@ -403,7 +399,7 @@ describe("MatrixClient", function() {
 
             expectedStates.push(["RECONNECTING", null]);
             expectedStates.push(["ERROR", "RECONNECTING"]);
-            expectedStates.push(["PREPARED", "ERROR"]);
+            expectedStates.push(["CATCHUP", "ERROR"]);
             client.on("sync", syncChecker(expectedStates, done));
             client.startClient();
         });
@@ -523,6 +519,21 @@ describe("MatrixClient", function() {
         });
 
         xit("should be able to peek into a room using peekInRoom", function(done) {
+        });
+    });
+
+    describe("getPresence", function() {
+        it("should send a presence HTTP GET", function() {
+            httpLookups = [{
+                method: "GET",
+                path: `/presence/${encodeURIComponent(userId)}/status`,
+                data: {
+                    "presence": "unavailable",
+                    "last_active_ago": 420845,
+                },
+            }];
+            client.getPresence(userId);
+            expect(httpLookups.length).toEqual(0);
         });
     });
 });

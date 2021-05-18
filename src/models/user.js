@@ -1,5 +1,6 @@
 /*
 Copyright 2015, 2016 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,12 +14,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
  * @module models/user
  */
- const EventEmitter = require("events").EventEmitter;
- const utils = require("../utils");
+
+import * as utils from "../utils";
+import {EventEmitter} from "events";
 
 /**
  * Construct a new User. A User must have an ID and can optionally have extra
@@ -39,13 +41,17 @@ limitations under the License.
  *                when a user was last active.
  * @prop {Boolean} currentlyActive Whether we should consider lastActiveAgo to be
  *               an approximation and that the user should be seen as active 'now'
+ * @prop {string} _unstable_statusMessage The status message for the user, if known. This is
+ *                different from the presenceStatusMsg in that this is not tied to
+ *                the user's presence, and should be represented differently.
  * @prop {Object} events The events describing this user.
  * @prop {MatrixEvent} events.presence The m.presence event for this user.
  */
-function User(userId) {
+export function User(userId) {
     this.userId = userId;
     this.presence = "offline";
     this.presenceStatusMsg = null;
+    this._unstable_statusMessage = "";
     this.displayName = userId;
     this.rawDisplayName = userId;
     this.avatarUrl = null;
@@ -123,7 +129,11 @@ User.prototype.setPresenceEvent = function(event) {
  */
 User.prototype.setDisplayName = function(name) {
     const oldName = this.displayName;
-    this.displayName = name;
+    if (typeof name === "string") {
+        this.displayName = name;
+    } else {
+        this.displayName = undefined;
+    }
     if (name !== oldName) {
         this._updateModifiedTime();
     }
@@ -136,7 +146,11 @@ User.prototype.setDisplayName = function(name) {
  * @param {string} name The new display name.
  */
 User.prototype.setRawDisplayName = function(name) {
-    this.rawDisplayName = name;
+    if (typeof name === "string") {
+        this.rawDisplayName = name;
+    } else {
+        this.rawDisplayName = undefined;
+    }
 };
 
 
@@ -180,9 +194,16 @@ User.prototype.getLastActiveTs = function() {
 };
 
 /**
- * The User class.
+ * Manually set the user's status message.
+ * @param {MatrixEvent} event The <code>im.vector.user_status</code> event.
+ * @fires module:client~MatrixClient#event:"User._unstable_statusMessage"
  */
-module.exports = User;
+User.prototype._unstable_updateStatusMessage = function(event) {
+    if (!event.getContent()) this._unstable_statusMessage = "";
+    else this._unstable_statusMessage = event.getContent()["status"];
+    this._updateModifiedTime();
+    this.emit("User._unstable_statusMessage", this);
+};
 
 /**
  * Fires whenever any user's lastPresenceTs changes,

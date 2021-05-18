@@ -1,10 +1,5 @@
-"use strict";
-import 'source-map-support/register';
-const sdk = require("../..");
-const RoomMember = sdk.RoomMember;
-const utils = require("../test-utils");
-
-import expect from 'expect';
+import * as utils from "../test-utils";
+import {RoomMember} from "../../src/models/room-member";
 
 describe("RoomMember", function() {
     const roomId = "!foo:bar";
@@ -14,7 +9,6 @@ describe("RoomMember", function() {
     let member;
 
     beforeEach(function() {
-        utils.beforeEach(this); // eslint-disable-line no-invalid-this
         member = new RoomMember(roomId, userA);
     });
 
@@ -36,13 +30,7 @@ describe("RoomMember", function() {
             const url = member.getAvatarUrl(hsUrl);
             // we don't care about how the mxc->http conversion is done, other
             // than it contains the mxc body.
-            expect(url.indexOf("flibble/wibble")).toNotEqual(-1);
-        });
-
-        it("should return an identicon HTTP URL if allowDefault was set and there " +
-        "was no m.room.member event", function() {
-            const url = member.getAvatarUrl(hsUrl, 64, 64, "crop", true);
-            expect(url.indexOf("http")).toEqual(0); // don't care about form
+            expect(url.indexOf("flibble/wibble")).not.toEqual(-1);
         });
 
         it("should return nothing if there is no m.room.member and allowDefault=false",
@@ -192,6 +180,15 @@ describe("RoomMember", function() {
         });
     });
 
+    describe("isOutOfBand", function() {
+        it("should be set by markOutOfBand", function() {
+            const member = new RoomMember();
+            expect(member.isOutOfBand()).toEqual(false);
+            member.markOutOfBand();
+            expect(member.isOutOfBand()).toEqual(true);
+        });
+    });
+
     describe("setMembershipEvent", function() {
         const joinEvent = utils.mkMembership({
             event: true,
@@ -246,9 +243,9 @@ describe("RoomMember", function() {
             member.setMembershipEvent(joinEvent);
             expect(member.name).toEqual("Alice"); // prefer displayname
             member.setMembershipEvent(joinEvent, roomState);
-            expect(member.name).toNotEqual("Alice"); // it should disambig.
+            expect(member.name).not.toEqual("Alice"); // it should disambig.
             // user_id should be there somewhere
-            expect(member.name.indexOf(userA)).toNotEqual(-1);
+            expect(member.name.indexOf(userA)).not.toEqual(-1);
         });
 
         it("should emit 'RoomMember.membership' if the membership changes", function() {
@@ -275,6 +272,53 @@ describe("RoomMember", function() {
             expect(emitCount).toEqual(1);
             member.setMembershipEvent(joinEvent); // no-op
             expect(emitCount).toEqual(1);
+        });
+
+        it("should set 'name' to user_id if it is just whitespace", function() {
+            const joinEvent = utils.mkMembership({
+                event: true,
+                mship: "join",
+                user: userA,
+                room: roomId,
+                name: " \u200b ",
+            });
+
+            expect(member.name).toEqual(userA); // default = user_id
+            member.setMembershipEvent(joinEvent);
+            expect(member.name).toEqual(userA); // it should fallback because all whitespace
+        });
+
+        it("should disambiguate users on a fuzzy displayname match", function() {
+            const joinEvent = utils.mkMembership({
+                event: true,
+                mship: "join",
+                user: userA,
+                room: roomId,
+                name: "Alíce\u200b", // note diacritic and zero width char
+            });
+
+            const roomState = {
+                getStateEvents: function(type) {
+                    if (type !== "m.room.member") {
+                        return [];
+                    }
+                    return [
+                        utils.mkMembership({
+                            event: true, mship: "join", room: roomId,
+                            user: userC, name: "Alice",
+                        }),
+                        joinEvent,
+                    ];
+                },
+                getUserIdsWithDisplayName: function(displayName) {
+                    return [userA, userC];
+                },
+            };
+            expect(member.name).toEqual(userA); // default = user_id
+            member.setMembershipEvent(joinEvent, roomState);
+            expect(member.name).not.toEqual("Alíce"); // it should disambig.
+            // user_id should be there somewhere
+            expect(member.name.indexOf(userA)).not.toEqual(-1);
         });
     });
 });

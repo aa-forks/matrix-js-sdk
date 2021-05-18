@@ -1,17 +1,33 @@
 #!/bin/bash
 #
-# Script to perform a release of matrix-js-sdk.
+# Script to perform a release of matrix-js-sdk and downstream projects.
 #
 # Requires:
 #   github-changelog-generator; install via:
 #     pip install git+https://github.com/matrix-org/github-changelog-generator.git
 #   jq; install from your distribution's package manager (https://stedolan.github.io/jq/)
-#   hub; install via brew (OSX) or source/pre-compiled binaries (debian) (https://github.com/github/hub) - Tested on v2.2.9
+#   hub; install via brew (macOS) or source/pre-compiled binaries (debian) (https://github.com/github/hub) - Tested on v2.2.9
+#   npm; typically installed by Node.js
+#   yarn; install via brew (macOS) or similar (https://yarnpkg.com/docs/install/)
+#
+# Note: this script is also used to release matrix-react-sdk and element-web.
 
 set -e
 
 jq --version > /dev/null || (echo "jq is required: please install it"; kill $$)
-hub --version > /dev/null || (echo "hub is required: please install it"; kill $$)
+if [[ `command -v hub` ]] && [[ `hub --version` =~ hub[[:space:]]version[[:space:]]([0-9]*).([0-9]*) ]]; then
+    HUB_VERSION_MAJOR=${BASH_REMATCH[1]}
+    HUB_VERSION_MINOR=${BASH_REMATCH[2]}
+    if [[ $HUB_VERSION_MAJOR -lt 2 ]] || [[ $HUB_VERSION_MAJOR -eq 2 && $HUB_VERSION_MINOR -lt 5 ]]; then
+        echo "hub version 2.5 is required, you have $HUB_VERSION_MAJOR.$HUB_VERSION_MINOR installed"
+        exit
+    fi
+else
+    echo "hub is required: please install it"
+    exit
+fi
+npm --version > /dev/null || (echo "npm is required: please install it"; kill $$)
+yarn --version > /dev/null || (echo "yarn is required: please install it"; kill $$)
 
 USAGE="$0 [-xz] [-c changelog_file] vX.Y.Z"
 
@@ -22,6 +38,7 @@ $USAGE
     -c changelog_file:  specify name of file containing changelog
     -x:                 skip updating the changelog
     -z:                 skip generating the jsdoc
+    -n:                 skip publish to NPM
 EOF
 }
 
@@ -44,8 +61,10 @@ fi
 
 skip_changelog=
 skip_jsdoc=
+skip_npm=
 changelog_file="CHANGELOG.md"
-while getopts hc:xz f; do
+expected_npm_user="matrixdotorg"
+while getopts hc:u:xzn f; do
     case $f in
         h)
             help
@@ -60,6 +79,12 @@ while getopts hc:xz f; do
         z)
             skip_jsdoc=1
             ;;
+        n)
+            skip_npm=1
+            ;;
+        u)
+            expected_npm_user="$OPTARG"
+            ;;
     esac
 done
 shift `expr $OPTIND - 1`
@@ -69,9 +94,27 @@ if [ $# -ne 1 ]; then
     exit 1
 fi
 
+# We use Git branch / commit dependencies for some packages, and Yarn seems
+# to have a hard time getting that right. See also
+# https://github.com/yarnpkg/yarn/issues/4734. As a workaround, we clean the
+# global cache here to ensure we get the right thing.
+yarn cache clean
+# Ensure all dependencies are updated
+yarn install --ignore-scripts
+
 if [ -z "$skip_changelog" ]; then
     # update_changelog doesn't have a --version flag
     update_changelog -h > /dev/null || (echo "github-changelog-generator is required: please install it"; exit)
+fi
+
+# Login and publish continues to use `npm`, as it seems to have more clearly
+# defined options and semantics than `yarn` for writing to the registry.
+if [ -z "$skip_npm" ]; then
+    actual_npm_user=`npm whoami`;
+    if [ $expected_npm_user != $actual_npm_user ]; then
+        echo "you need to be logged into npm as $expected_npm_user, but you are logged in as $actual_npm_user" >&2
+        exit 1
+    fi
 fi
 
 # ignore leading v on release
@@ -127,14 +170,35 @@ cat "${changelog_file}" | `dirname $0`/scripts/changelog_head.py > "${latest_cha
 set -x
 
 # Bump package.json and build the dist
-echo "npm version"
-# npm version will automatically commit its modification
+echo "yarn version"
+# yarn version will automatically commit its modification
 # and make a release tag. We don't want it to create the tag
 # because it can only sign with the default key, but we can
 # only turn off both of these behaviours, so we have to
 # manually commit the result.
-npm version --no-git-tag-version "$release"
-git commit package.json -m "$tag"
+yarn version --no-git-tag-version --new-version "$release"
+
+# For the published and dist versions of the package, we copy the
+# `matrix_lib_main` and `matrix_lib_typings` fields to `main` and `typings` (if
+# they exist). This small bit of gymnastics allows us to use the TypeScript
+# source directly for development without needing to build before linting or
+# testing.
+for i in main typings
+do
+    lib_value=$(jq -r ".matrix_lib_$i" package.json)
+    if [ "$lib_value" != "null" ]; then
+        jq ".$i = .matrix_lib_$i" package.json > package.json.new && mv package.json.new package.json
+    fi
+done
+
+# commit yarn.lock if it exists, is versioned, and is modified
+if [[ -f yarn.lock && `git status --porcelain yarn.lock | grep '^ M'` ]];
+then
+    pkglock='yarn.lock'
+else
+    pkglock=''
+fi
+git commit package.json $pkglock -m "$tag"
 
 
 # figure out if we should be signing this release
@@ -150,7 +214,7 @@ fi
 # assets.
 # We make a completely separate checkout to be sure
 # we're using released versions of the dependencies
-# (rather than whatever we're pulling in from npm link)
+# (rather than whatever we're pulling in from yarn link)
 assets=''
 dodist=0
 jq -e .scripts.dist package.json 2> /dev/null || dodist=$?
@@ -161,10 +225,10 @@ if [ $dodist -eq 0 ]; then
     pushd "$builddir"
     git clone "$projdir" .
     git checkout "$rel_branch"
-    npm install
+    yarn install
     # We haven't tagged yet, so tell the dist script what version
     # it's building
-    DIST_VERSION="$tag" npm run dist
+    DIST_VERSION="$tag" yarn dist
 
     popd
 
@@ -245,7 +309,7 @@ release_text=`mktemp`
 echo "$tag" > "${release_text}"
 echo >> "${release_text}"
 cat "${latest_changes}" >> "${release_text}"
-hub release create $hubflags $assets -f "${release_text}" "$tag"
+hub release create $hubflags $assets -F "${release_text}" "$tag"
 
 if [ $dodist -eq 0 ]; then
     rm -rf "$builddir"
@@ -253,12 +317,22 @@ fi
 rm "${release_text}"
 rm "${latest_changes}"
 
-# publish to npmjs
-npm publish
+# Login and publish continues to use `npm`, as it seems to have more clearly
+# defined options and semantics than `yarn` for writing to the registry.
+# Tag both releases and prereleases as `next` so the last stable release remains
+# the default.
+if [ -z "$skip_npm" ]; then
+    npm publish --tag next
+    if [ $prerelease -eq 0 ]; then
+        # For a release, also add the default `latest` tag.
+        package=$(cat package.json | jq -er .name)
+        npm dist-tag add "$package@$release" latest
+    fi
+fi
 
 if [ -z "$skip_jsdoc" ]; then
     echo "generating jsdocs"
-    npm run gendoc
+    yarn gendoc
 
     echo "copying jsdocs to gh-pages branch"
     git checkout gh-pages
@@ -269,6 +343,7 @@ if [ -z "$skip_jsdoc" ]; then
         $release index.html
     git add "$release"
     git commit --no-verify -m "Add jsdoc for $release" index.html "$release"
+    git push origin gh-pages
 fi
 
 # if it is a pre-release, leave it on the release branch for now.
@@ -281,16 +356,40 @@ fi
 echo "updating master branch"
 git checkout master
 git pull
-git merge --ff-only "$rel_branch"
+git merge "$rel_branch" --no-edit
 
-# push master  and docs (if generated) to github
+# push master to github
 git push origin master
-if [ -z "$skip_jsdoc" ]; then
-    git push origin gh-pages
-fi
 
-# finally, merge master back onto develop
-git checkout develop
-git pull
-git merge master
-git push origin develop
+# finally, merge master back onto develop (if it exists)
+if [ $(git branch -lr | grep origin/develop -c) -ge 1 ]; then
+    git checkout develop
+    git pull
+    git merge master --no-edit
+
+    # When merging to develop, we need revert the `main` and `typings` fields if
+    # we adjusted them previously.
+    for i in main typings
+    do
+        # If a `lib` prefixed value is present, it means we adjusted the field
+        # earlier at publish time, so we should revert it now.
+        if [ "$(jq -r ".matrix_lib_$i" package.json)" != "null" ]; then
+            # If there's a `src` prefixed value, use that, otherwise delete.
+            # This is used to delete the `typings` field and reset `main` back
+            # to the TypeScript source.
+            src_value=$(jq -r ".matrix_src_$i" package.json)
+            if [ "$src_value" != "null" ]; then
+                jq ".$i = .matrix_src_$i" package.json > package.json.new && mv package.json.new package.json
+            else
+                jq "del(.$i)" package.json > package.json.new && mv package.json.new package.json
+            fi
+        fi
+    done
+
+    if [ -n "$(git ls-files --modified package.json)" ]; then
+        echo "Committing develop package.json"
+        git commit package.json -m "Resetting package fields for development"
+    fi
+
+    git push origin develop
+fi

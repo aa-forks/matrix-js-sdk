@@ -1,5 +1,6 @@
 /*
 Copyright 2015, 2016 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,14 +14,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
  * @module models/room-member
  */
-const EventEmitter = require("events").EventEmitter;
-const ContentRepo = require("../content-repo");
 
-const utils = require("../utils");
+import {EventEmitter} from "events";
+import {getHttpUriForMxc} from "../content-repo";
+import * as utils from "../utils";
 
 /**
  * Construct a new room member.
@@ -45,7 +46,7 @@ const utils = require("../utils");
  * @prop {Object} events The events describing this RoomMember.
  * @prop {MatrixEvent} events.member The m.room.member event for this RoomMember.
  */
-function RoomMember(roomId, userId) {
+export function RoomMember(roomId, userId) {
     this.roomId = roomId;
     this.userId = userId;
     this.typing = false;
@@ -58,9 +59,26 @@ function RoomMember(roomId, userId) {
     this.events = {
         member: null,
     };
+    this._isOutOfBand = false;
     this._updateModifiedTime();
 }
 utils.inherits(RoomMember, EventEmitter);
+
+/**
+ * Mark the member as coming from a channel that is not sync
+ */
+RoomMember.prototype.markOutOfBand = function() {
+    this._isOutOfBand = true;
+};
+
+/**
+ * @return {bool} does the member come from a channel that is not sync?
+ * This is used to store the member seperately
+ * from the sync state so it available across browser sessions.
+ */
+RoomMember.prototype.isOutOfBand = function() {
+    return this._isOutOfBand;
+};
 
 /**
  * Update this room member's membership event. May fire "RoomMember.name" if
@@ -75,13 +93,20 @@ RoomMember.prototype.setMembershipEvent = function(event, roomState) {
     if (event.getType() !== "m.room.member") {
         return;
     }
+
+    this._isOutOfBand = false;
+
     this.events.member = event;
 
     const oldMembership = this.membership;
     this.membership = event.getDirectionalContent().membership;
 
     const oldName = this.name;
-    this.name = calculateDisplayName(this, event, roomState);
+    this.name = calculateDisplayName(
+        this.userId,
+        event.getDirectionalContent().displayname,
+        roomState);
+
     this.rawDisplayName = event.getDirectionalContent().displayname || this.userId;
     if (oldMembership !== this.membership) {
         this._updateModifiedTime();
@@ -108,14 +133,15 @@ RoomMember.prototype.setPowerLevelEvent = function(powerLevelEvent) {
     const evContent = powerLevelEvent.getDirectionalContent();
 
     let maxLevel = evContent.users_default || 0;
-    utils.forEach(utils.values(evContent.users), function(lvl) {
+    const users = evContent.users || {};
+    Object.values(users).forEach(function(lvl) {
         maxLevel = Math.max(maxLevel, lvl);
     });
     const oldPowerLevel = this.powerLevel;
     const oldPowerLevelNorm = this.powerLevelNorm;
 
-    if (evContent.users && evContent.users[this.userId] !== undefined) {
-        this.powerLevel = evContent.users[this.userId];
+    if (users[this.userId] !== undefined) {
+        this.powerLevel = users[this.userId];
     } else if (evContent.users_default !== undefined) {
         this.powerLevel = evContent.users_default;
     } else {
@@ -147,7 +173,7 @@ RoomMember.prototype.setTypingEvent = function(event) {
     const oldTyping = this.typing;
     this.typing = false;
     const typingList = event.getContent().user_ids;
-    if (!utils.isArray(typingList)) {
+    if (!Array.isArray(typingList)) {
         // malformed event :/ bail early. TODO: whine?
         return;
     }
@@ -177,6 +203,44 @@ RoomMember.prototype.getLastModifiedTime = function() {
     return this._modified;
 };
 
+
+RoomMember.prototype.isKicked = function() {
+    return this.membership === "leave" &&
+        this.events.member.getSender() !== this.events.member.getStateKey();
+};
+
+/**
+ * If this member was invited with the is_direct flag set, return
+ * the user that invited this member
+ * @return {string} user id of the inviter
+ */
+RoomMember.prototype.getDMInviter = function() {
+    // when not available because that room state hasn't been loaded in,
+    // we don't really know, but more likely to not be a direct chat
+    if (this.events.member) {
+        // TODO: persist the is_direct flag on the member as more member events
+        //       come in caused by displayName changes.
+
+        // the is_direct flag is set on the invite member event.
+        // This is copied on the prev_content section of the join member event
+        // when the invite is accepted.
+
+        const memberEvent = this.events.member;
+        let memberContent = memberEvent.getContent();
+        let inviteSender = memberEvent.getSender();
+
+        if (memberContent.membership === "join") {
+            memberContent = memberEvent.getPrevContent();
+            inviteSender = memberEvent.getUnsigned().prev_sender;
+        }
+
+        if (memberContent.membership === "invite" && memberContent.is_direct) {
+            return inviteSender;
+        }
+    }
+};
+
+
 /**
  * Get the avatar URL for a room member.
  * @param {string} baseUrl The base homeserver URL See
@@ -187,7 +251,7 @@ RoomMember.prototype.getLastModifiedTime = function() {
  * "crop" or "scale".
  * @param {Boolean} allowDefault (optional) Passing false causes this method to
  * return null if the user has no avatar image. Otherwise, a default image URL
- * will be returned. Default: true.
+ * will be returned. Default: true. (Deprecated)
  * @param {Boolean} allowDirectLinks (optional) If true, the avatar URL will be
  * returned even if it is a direct hyperlink rather than a matrix content URL.
  * If false, any non-matrix content URLs will be ignored. Setting this option to
@@ -200,28 +264,44 @@ RoomMember.prototype.getAvatarUrl =
     if (allowDefault === undefined) {
         allowDefault = true;
     }
-    if (!this.events.member && !allowDefault) {
+
+    const rawUrl = this.getMxcAvatarUrl();
+
+    if (!rawUrl && !allowDefault) {
         return null;
     }
-    const rawUrl = this.events.member ? this.events.member.getContent().avatar_url : null;
-    const httpUrl = ContentRepo.getHttpUriForMxc(
+    const httpUrl = getHttpUriForMxc(
         baseUrl, rawUrl, width, height, resizeMethod, allowDirectLinks,
     );
     if (httpUrl) {
         return httpUrl;
-    } else if (allowDefault) {
-        return ContentRepo.getIdenticonUri(
-            baseUrl, this.userId, width, height,
-        );
+    }
+    return null;
+};
+/**
+ * get the mxc avatar url, either from a state event, or from a lazily loaded member
+ * @return {string} the mxc avatar url
+ */
+RoomMember.prototype.getMxcAvatarUrl = function() {
+    if (this.events.member) {
+        return this.events.member.getDirectionalContent().avatar_url;
+    } else if (this.user) {
+        return this.user.avatarUrl;
     }
     return null;
 };
 
-function calculateDisplayName(member, event, roomState) {
-    const displayName = event.getDirectionalContent().displayname;
-    const selfUserId = member.userId;
+const MXID_PATTERN = /@.+:.+/;
+const LTR_RTL_PATTERN = /[\u200E\u200F\u202A-\u202F]/;
 
-    if (!displayName) {
+function calculateDisplayName(selfUserId, displayName, roomState) {
+    if (!displayName || displayName === selfUserId) {
+        return selfUserId;
+    }
+
+    // First check if the displayname is something we consider truthy
+    // after stripping it of zero width characters and padding spaces
+    if (!utils.removeHiddenChars(displayName)) {
         return selfUserId;
     }
 
@@ -229,22 +309,22 @@ function calculateDisplayName(member, event, roomState) {
         return displayName;
     }
 
-    // First check if the displayname is something we consider truthy
-    // after stripping it of zero width characters and padding spaces
-    const strippedDisplayName = utils.removeHiddenChars(displayName);
-    if (!strippedDisplayName) {
-        return selfUserId;
-    }
-
     // Next check if the name contains something that look like a mxid
     // If it does, it may be someone trying to impersonate someone else
     // Show full mxid in this case
-    // Also show mxid if there are other people with the same displayname
-    // ignoring any zero width chars (unicode 200B-200D)
-    // if their displayname is made up of just zero width chars, show full mxid
-    let disambiguate = /@.+:.+/.test(displayName);
+    let disambiguate = MXID_PATTERN.test(displayName);
+
     if (!disambiguate) {
-        const userIds = roomState.getUserIdsWithDisplayName(strippedDisplayName);
+        // Also show mxid if the display name contains any LTR/RTL characters as these
+        // make it very difficult for us to find similar *looking* display names
+        // E.g "Mark" could be cloned by writing "kraM" but in RTL.
+        disambiguate = LTR_RTL_PATTERN.test(displayName);
+    }
+
+    if (!disambiguate) {
+        // Also show mxid if there are other people with the same or similar
+        // displayname, after hidden character removal.
+        const userIds = roomState.getUserIdsWithDisplayName(displayName);
         disambiguate = userIds.some((u) => u !== selfUserId);
     }
 
@@ -253,11 +333,6 @@ function calculateDisplayName(member, event, roomState) {
     }
     return displayName;
 }
-
-/**
- * The RoomMember class.
- */
-module.exports = RoomMember;
 
 /**
  * Fires whenever any room member's name changes.

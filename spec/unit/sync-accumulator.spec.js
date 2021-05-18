@@ -1,5 +1,6 @@
 /*
 Copyright 2017 Vector Creations Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,19 +15,45 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-"use strict";
-import 'source-map-support/register';
-import utils from "../test-utils";
-import sdk from "../..";
-import expect from 'expect';
+import {SyncAccumulator} from "../../src/sync-accumulator";
 
-const SyncAccumulator = sdk.SyncAccumulator;
+// The event body & unsigned object get frozen to assert that they don't get altered
+// by the impl
+const RES_WITH_AGE = {
+    next_batch: "abc",
+    rooms: {
+        invite: {},
+        leave: {},
+        join: {
+            "!foo:bar": {
+                account_data: { events: [] },
+                ephemeral: { events: [] },
+                unread_notifications: {},
+                timeline: {
+                    events: [
+                        Object.freeze({
+                            content: {
+                                body: "This thing is happening right now!",
+                            },
+                            origin_server_ts: 123456789,
+                            sender: "@alice:localhost",
+                            type: "m.room.message",
+                            unsigned: Object.freeze({
+                                age: 50,
+                            }),
+                        }),
+                    ],
+                    prev_batch: "something",
+                },
+            },
+        },
+    },
+};
 
 describe("SyncAccumulator", function() {
     let sa;
 
     beforeEach(function() {
-        utils.beforeEach(this); // eslint-disable-line no-invalid-this
         sa = new SyncAccumulator({
             maxTimelineEntries: 10,
         });
@@ -51,6 +78,11 @@ describe("SyncAccumulator", function() {
                                 member("alice", "join"),
                                 member("bob", "join"),
                             ],
+                        },
+                        summary: {
+                            "m.heroes": undefined,
+                            "m.joined_member_count": undefined,
+                            "m.invited_member_count": undefined,
                         },
                         timeline: {
                             events: [msg("alice", "hi")],
@@ -316,6 +348,91 @@ describe("SyncAccumulator", function() {
                     },
                 },
             },
+        });
+    });
+
+    describe("summary field", function() {
+        function createSyncResponseWithSummary(summary) {
+            return {
+                next_batch: "abc",
+                rooms: {
+                    invite: {},
+                    leave: {},
+                    join: {
+                        "!foo:bar": {
+                            account_data: { events: [] },
+                            ephemeral: { events: [] },
+                            unread_notifications: {},
+                            state: {
+                                events: [],
+                            },
+                            summary: summary,
+                            timeline: {
+                                events: [],
+                                prev_batch: "something",
+                            },
+                        },
+                    },
+                },
+            };
+        }
+
+        it("should copy summary properties", function() {
+            sa.accumulate(createSyncResponseWithSummary({
+                "m.heroes": ["@alice:bar"],
+                "m.invited_member_count": 2,
+            }));
+            const summary = sa.getJSON().roomsData.join["!foo:bar"].summary;
+            expect(summary["m.invited_member_count"]).toEqual(2);
+            expect(summary["m.heroes"]).toEqual(["@alice:bar"]);
+        });
+
+        it("should accumulate summary properties", function() {
+            sa.accumulate(createSyncResponseWithSummary({
+                "m.heroes": ["@alice:bar"],
+                "m.invited_member_count": 2,
+            }));
+            sa.accumulate(createSyncResponseWithSummary({
+                "m.heroes": ["@bob:bar"],
+                "m.joined_member_count": 5,
+            }));
+            const summary = sa.getJSON().roomsData.join["!foo:bar"].summary;
+            expect(summary["m.invited_member_count"]).toEqual(2);
+            expect(summary["m.joined_member_count"]).toEqual(5);
+            expect(summary["m.heroes"]).toEqual(["@bob:bar"]);
+        });
+
+        it("should return correctly adjusted age attributes", () => {
+            const delta = 1000;
+            const startingTs = 1000;
+
+            const oldDateNow = Date.now;
+            try {
+                Date.now = jest.fn();
+                Date.now.mockReturnValue(startingTs);
+
+                sa.accumulate(RES_WITH_AGE);
+
+                Date.now.mockReturnValue(startingTs + delta);
+
+                const output = sa.getJSON();
+                expect(output.roomsData.join["!foo:bar"].timeline.events[0].unsigned.age).toEqual(
+                    RES_WITH_AGE.rooms.join["!foo:bar"].timeline.events[0].unsigned.age + delta,
+                );
+                expect(Object.keys(output.roomsData.join["!foo:bar"].timeline.events[0])).toEqual(
+                    Object.keys(RES_WITH_AGE.rooms.join["!foo:bar"].timeline.events[0]),
+                );
+            } finally {
+                Date.now = oldDateNow;
+            }
+        });
+
+        it("should mangle age without adding extra keys", () => {
+            sa.accumulate(RES_WITH_AGE);
+            const output = sa.getJSON();
+            expect(Object.keys(output.roomsData.join["!foo:bar"].timeline.events[0])).toEqual(
+                Object.keys(RES_WITH_AGE.rooms.join["!foo:bar"].timeline.events[0]),
+            );
         });
     });
 });

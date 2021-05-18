@@ -2,6 +2,7 @@
 Copyright 2015, 2016 OpenMarket Ltd
 Copyright 2017 Vector Creations Ltd
 Copyright 2018 New Vector Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,14 +16,22 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
- * This is an internal module. See {@link MatrixInMemoryStore} for the public class.
+ * This is an internal module. See {@link MemoryStore} for the public class.
  * @module store/memory
  */
-const utils = require("../utils");
-const User = require("../models/user");
-import Promise from 'bluebird';
+
+import {User} from "../models/user";
+
+function isValidFilterId(filterId) {
+    const isValidStr = typeof filterId === "string" &&
+        !!filterId &&
+        filterId !== "undefined" && // exclude these as we've serialized undefined in localStorage before
+        filterId !== "null";
+
+    return isValidStr || typeof filterId === "number";
+}
 
 /**
  * Construct a new in-memory data store for the Matrix Client.
@@ -31,7 +40,7 @@ import Promise from 'bluebird';
  * @param {LocalStorage} opts.localStorage The local storage instance to persist
  * some forms of data such as tokens. Rooms will NOT be stored.
  */
-module.exports.MatrixInMemoryStore = function MatrixInMemoryStore(opts) {
+export function MemoryStore(opts) {
     opts = opts || {};
     this.rooms = {
         // roomId: Room
@@ -52,9 +61,13 @@ module.exports.MatrixInMemoryStore = function MatrixInMemoryStore(opts) {
         // type : content
     };
     this.localStorage = opts.localStorage;
-};
+    this._oobMembers = {
+        // roomId: [member events]
+    };
+    this._clientOptions = {};
+}
 
-module.exports.MatrixInMemoryStore.prototype = {
+MemoryStore.prototype = {
 
     /**
      * Retrieve the token to stream from.
@@ -64,6 +77,10 @@ module.exports.MatrixInMemoryStore.prototype = {
         return this.syncToken;
     },
 
+    /** @return {Promise<bool>} whether or not the database was newly created in this session. */
+    isNewlyCreated: function() {
+        return Promise.resolve(true);
+    },
 
     /**
      * Set the token to stream from.
@@ -95,7 +112,7 @@ module.exports.MatrixInMemoryStore.prototype = {
      * @return {Group[]} A list of groups, which may be empty.
      */
     getGroups: function() {
-        return utils.values(this.groups);
+        return Object.values(this.groups);
     },
 
     /**
@@ -157,7 +174,7 @@ module.exports.MatrixInMemoryStore.prototype = {
      * @return {Room[]} A list of rooms, which may be empty.
      */
     getRooms: function() {
-        return utils.values(this.rooms);
+        return Object.values(this.rooms);
     },
 
     /**
@@ -176,7 +193,7 @@ module.exports.MatrixInMemoryStore.prototype = {
      * @return {RoomSummary[]} A summary of each room.
      */
     getRoomSummaries: function() {
-        return utils.map(utils.values(this.rooms), function(room) {
+        return Object.values(this.rooms).map(function(room) {
             return room.summary;
         });
     },
@@ -203,7 +220,7 @@ module.exports.MatrixInMemoryStore.prototype = {
      * @return {User[]} A list of users, which may be empty.
      */
     getUsers: function() {
-        return utils.values(this.users);
+        return Object.values(this.users);
     },
 
     /**
@@ -264,8 +281,17 @@ module.exports.MatrixInMemoryStore.prototype = {
         if (!this.localStorage) {
             return null;
         }
+        const key = "mxjssdk_memory_filter_" + filterName;
+        // XXX Storage.getItem doesn't throw ...
+        // or are we using something different
+        // than window.localStorage in some cases
+        // that does throw?
+        // that would be very naughty
         try {
-            return this.localStorage.getItem("mxjssdk_memory_filter_" + filterName);
+            const value = this.localStorage.getItem(key);
+            if (isValidFilterId(value)) {
+                return value;
+            }
         } catch (e) {}
         return null;
     },
@@ -279,8 +305,13 @@ module.exports.MatrixInMemoryStore.prototype = {
         if (!this.localStorage) {
             return;
         }
+        const key = "mxjssdk_memory_filter_" + filterName;
         try {
-            this.localStorage.setItem("mxjssdk_memory_filter_" + filterName, filterId);
+            if (isValidFilterId(filterId)) {
+                this.localStorage.setItem(key, filterId);
+            } else {
+                this.localStorage.removeItem(key);
+            }
         } catch (e) {}
     },
 
@@ -327,8 +358,10 @@ module.exports.MatrixInMemoryStore.prototype = {
 
     /**
      * Save does nothing as there is no backing data store.
+     * @param {bool} force True to force a save (but the memory
+     *     store still can't save anything)
      */
-    save: function() {},
+    save: function(force) {},
 
     /**
      * Startup does nothing as this store doesn't require starting up.
@@ -375,6 +408,44 @@ module.exports.MatrixInMemoryStore.prototype = {
         this.accountData = {
             // type : content
         };
+        return Promise.resolve();
+    },
+
+    /**
+     * Returns the out-of-band membership events for this room that
+     * were previously loaded.
+     * @param {string} roomId
+     * @returns {event[]} the events, potentially an empty array if OOB loading didn't yield any new members
+     * @returns {null} in case the members for this room haven't been stored yet
+     */
+    getOutOfBandMembers: function(roomId) {
+        return Promise.resolve(this._oobMembers[roomId] || null);
+    },
+
+    /**
+     * Stores the out-of-band membership events for this room. Note that
+     * it still makes sense to store an empty array as the OOB status for the room is
+     * marked as fetched, and getOutOfBandMembers will return an empty array instead of null
+     * @param {string} roomId
+     * @param {event[]} membershipEvents the membership events to store
+     * @returns {Promise} when all members have been stored
+     */
+    setOutOfBandMembers: function(roomId, membershipEvents) {
+        this._oobMembers[roomId] = membershipEvents;
+        return Promise.resolve();
+    },
+
+    clearOutOfBandMembers: function() {
+        this._oobMembers = {};
+        return Promise.resolve();
+    },
+
+    getClientOptions: function() {
+        return Promise.resolve(this._clientOptions);
+    },
+
+    storeClientOptions: function(options) {
+        this._clientOptions = Object.assign({}, options);
         return Promise.resolve();
     },
 };

@@ -1,5 +1,6 @@
 /*
 Copyright 2015, 2016 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,20 +14,20 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
  * This is an internal module. See {@link MatrixHttpApi} for the public class.
  * @module http-api
  */
-import Promise from 'bluebird';
-const parseContentType = require('content-type').parse;
 
-const utils = require("./utils");
+import {parse as parseContentType} from "content-type";
+import * as utils from "./utils";
+import {logger} from './logger';
 
 // we use our own implementation of setTimeout, so that if we get suspended in
 // the middle of a /sync, we cancel the sync as soon as we awake, rather than
 // waiting for the delay to elapse.
-const callbacks = require("./realtime-callbacks");
+import * as callbacks from "./realtime-callbacks";
 
 /*
 TODO:
@@ -37,22 +38,28 @@ TODO:
 /**
  * A constant representing the URI path for release 0 of the Client-Server HTTP API.
  */
-module.exports.PREFIX_R0 = "/_matrix/client/r0";
+export const PREFIX_R0 = "/_matrix/client/r0";
 
 /**
  * A constant representing the URI path for as-yet unspecified Client-Server HTTP APIs.
  */
-module.exports.PREFIX_UNSTABLE = "/_matrix/client/unstable";
+export const PREFIX_UNSTABLE = "/_matrix/client/unstable";
 
 /**
- * URI path for the identity API
+ * URI path for v1 of the the identity API
+ * @deprecated Use v2.
  */
-module.exports.PREFIX_IDENTITY_V1 = "/_matrix/identity/api/v1";
+export const PREFIX_IDENTITY_V1 = "/_matrix/identity/api/v1";
+
+/**
+ * URI path for the v2 identity API
+ */
+export const PREFIX_IDENTITY_V2 = "/_matrix/identity/v2";
 
 /**
  * URI path for the media repo API
  */
-module.exports.PREFIX_MEDIA_R0 = "/_matrix/media/r0";
+export const PREFIX_MEDIA_R0 = "/_matrix/media/r0";
 
 /**
  * Construct a MatrixHttpApi.
@@ -79,16 +86,23 @@ module.exports.PREFIX_MEDIA_R0 = "/_matrix/media/r0";
  * @param {boolean} [opts.useAuthorizationHeader = false] Set to true to use
  * Authorization header instead of query param to send the access token to the server.
  */
-module.exports.MatrixHttpApi = function MatrixHttpApi(event_emitter, opts) {
+export function MatrixHttpApi(event_emitter, opts) {
     utils.checkObjectHasKeys(opts, ["baseUrl", "request", "prefix"]);
     opts.onlyData = opts.onlyData || false;
     this.event_emitter = event_emitter;
     this.opts = opts;
     this.useAuthorizationHeader = Boolean(opts.useAuthorizationHeader);
     this.uploads = [];
-};
+}
 
-module.exports.MatrixHttpApi.prototype = {
+MatrixHttpApi.prototype = {
+    /**
+     * Sets the baase URL for the identity server
+     * @param {string} url The new base url
+     */
+    setIdBaseUrl: function(url) {
+        this.opts.idBaseUrl = url;
+    },
 
     /**
      * Get the content repository url with query parameters.
@@ -101,7 +115,7 @@ module.exports.MatrixHttpApi.prototype = {
         };
         return {
             base: this.opts.baseUrl,
-            path: "/_matrix/media/v1/upload",
+            path: "/_matrix/media/r0/upload",
             params: params,
         };
     },
@@ -142,7 +156,7 @@ module.exports.MatrixHttpApi.prototype = {
      *    data has been uploaded, with an object containing the fields `loaded`
      *    (number of bytes transferred) and `total` (total size, if known).
      *
-     * @return {module:client.Promise} Resolves to response object, as
+     * @return {Promise} Resolves to response object, as
      *    determined by this.opts.onlyData, opts.rawResponse, and
      *    opts.onlyContentUri.  Rejects with an error (usually a MatrixError).
      */
@@ -164,9 +178,21 @@ module.exports.MatrixHttpApi.prototype = {
         const contentType = opts.type || file.type || 'application/octet-stream';
         const fileName = opts.name || file.name;
 
-        // we used to recommend setting file.stream to the thing to upload on
-        // nodejs.
-        const body = file.stream ? file.stream : file;
+        // We used to recommend setting file.stream to the thing to upload on
+        // Node.js. As of 2019-06-11, this is still in widespread use in various
+        // clients, so we should preserve this for simple objects used in
+        // Node.js. File API objects (via either the File or Blob interfaces) in
+        // the browser now define a `stream` method, which leads to trouble
+        // here, so we also check the type of `stream`.
+        let body = file;
+        if (body.stream && typeof body.stream !== "function") {
+            logger.warn(
+                "Using `file.stream` as the content to upload. Future " +
+                "versions of the js-sdk will change this to expect `file` to " +
+                "be the content directly.",
+            );
+            body = body.stream;
+        }
 
         // backwards-compatibility hacks where we used to do different things
         // between browser and node.
@@ -175,7 +201,7 @@ module.exports.MatrixHttpApi.prototype = {
             if (global.XMLHttpRequest) {
                 rawResponse = false;
             } else {
-                console.warn(
+                logger.warn(
                     "Returning the raw JSON from uploadContent(). Future " +
                     "versions of the js-sdk will change this default, to " +
                     "return the parsed object. Set opts.rawResponse=false " +
@@ -188,7 +214,7 @@ module.exports.MatrixHttpApi.prototype = {
         let onlyContentUri = opts.onlyContentUri;
         if (!rawResponse && onlyContentUri === undefined) {
             if (global.XMLHttpRequest) {
-                console.warn(
+                logger.warn(
                     "Returning only the content-uri from uploadContent(). " +
                     "Future versions of the js-sdk will change this " +
                     "default, to return the whole response object. Set " +
@@ -230,7 +256,7 @@ module.exports.MatrixHttpApi.prototype = {
         }
 
         if (global.XMLHttpRequest) {
-            const defer = Promise.defer();
+            const defer = utils.defer();
             const xhr = new global.XMLHttpRequest();
             upload.xhr = xhr;
             const cb = requestCallback(defer, opts.callback, this.opts.onlyData);
@@ -245,11 +271,14 @@ module.exports.MatrixHttpApi.prototype = {
             xhr.timeout_timer = callbacks.setTimeout(timeout_fn, 30000);
 
             xhr.onreadystatechange = function() {
+                let resp;
                 switch (xhr.readyState) {
                     case global.XMLHttpRequest.DONE:
                         callbacks.clearTimeout(xhr.timeout_timer);
-                        var resp;
                         try {
+                            if (xhr.status === 0) {
+                                throw new AbortError();
+                            }
                             if (!xhr.responseText) {
                                 throw new Error('No response body.');
                             }
@@ -278,7 +307,7 @@ module.exports.MatrixHttpApi.prototype = {
                     });
                 }
             });
-            let url = this.opts.baseUrl + "/_matrix/media/v1/upload";
+            let url = this.opts.baseUrl + "/_matrix/media/r0/upload";
 
             const queryArgs = [];
 
@@ -314,7 +343,7 @@ module.exports.MatrixHttpApi.prototype = {
 
             promise = this.authedRequest(
                 opts.callback, "POST", "/upload", queryParams, body, {
-                    prefix: "/_matrix/media/v1",
+                    prefix: "/_matrix/media/r0",
                     headers: {"Content-Type": contentType},
                     json: false,
                     bodyParser: bodyParser,
@@ -355,7 +384,18 @@ module.exports.MatrixHttpApi.prototype = {
         return this.uploads;
     },
 
-    idServerRequest: function(callback, method, path, params, prefix) {
+    idServerRequest: function(
+        callback,
+        method,
+        path,
+        params,
+        prefix,
+        accessToken,
+    ) {
+        if (!this.opts.idBaseUrl) {
+            throw new Error("No Identity Server base URL set");
+        }
+
         const fullUri = this.opts.idBaseUrl + prefix + path;
 
         if (callback !== undefined && !utils.isFunction(callback)) {
@@ -368,26 +408,25 @@ module.exports.MatrixHttpApi.prototype = {
             uri: fullUri,
             method: method,
             withCredentials: false,
-            json: false,
+            json: true, // we want a JSON response if we can
             _matrix_opts: this.opts,
+            headers: {},
         };
-        if (method == 'GET') {
+        if (method === 'GET') {
             opts.qs = params;
-        } else {
-            opts.form = params;
+        } else if (typeof params === "object") {
+            opts.json = params;
+        }
+        if (accessToken) {
+            opts.headers['Authorization'] = `Bearer ${accessToken}`;
         }
 
-        const defer = Promise.defer();
+        const defer = utils.defer();
         this.opts.request(
             opts,
             requestCallback(defer, callback, this.opts.onlyData),
         );
-        // ID server does not always take JSON, so we can't use requests' 'json'
-        // option as we do with the home server, but it does return JSON, so
-        // parse it manually
-        return defer.promise.then(function(response) {
-            return JSON.parse(response);
-        });
+        return defer.promise;
     },
 
     /**
@@ -435,7 +474,7 @@ module.exports.MatrixHttpApi.prototype = {
      * @param {Object=} queryParams A dict of query params (these will NOT be
      * urlencoded). If unspecified, there will be no query params.
      *
-     * @param {Object} data The HTTP JSON body.
+     * @param {Object} [data] The HTTP JSON body.
      *
      * @param {Object|Number=} opts additional options. If a number is specified,
      * this is treated as `opts.localTimeoutMs`.
@@ -448,7 +487,7 @@ module.exports.MatrixHttpApi.prototype = {
      *
      * @param {Object=} opts.headers map of additional request headers
      *
-     * @return {module:client.Promise} Resolves to <code>{data: {Object},
+     * @return {Promise} Resolves to <code>{data: {Object},
      * headers: {Object}, code: {Number}}</code>.
      * If <code>onlyData</code> is set, this will resolve to the <code>data</code>
      * object only.
@@ -491,7 +530,7 @@ module.exports.MatrixHttpApi.prototype = {
         const self = this;
         requestPromise.catch(function(err) {
             if (err.errcode == 'M_UNKNOWN_TOKEN') {
-                self.event_emitter.emit("Session.logged_out");
+                self.event_emitter.emit("Session.logged_out", err);
             } else if (err.errcode == 'M_CONSENT_NOT_GIVEN') {
                 self.event_emitter.emit(
                     "no_consent",
@@ -517,7 +556,7 @@ module.exports.MatrixHttpApi.prototype = {
      * @param {Object=} queryParams A dict of query params (these will NOT be
      * urlencoded). If unspecified, there will be no query params.
      *
-     * @param {Object} data The HTTP JSON body.
+     * @param {Object} [data] The HTTP JSON body.
      *
      * @param {Object=} opts additional options
      *
@@ -529,7 +568,7 @@ module.exports.MatrixHttpApi.prototype = {
      *
      * @param {Object=} opts.headers map of additional request headers
      *
-     * @return {module:client.Promise} Resolves to <code>{data: {Object},
+     * @return {Promise} Resolves to <code>{data: {Object},
      * headers: {Object}, code: {Number}}</code>.
      * If <code>onlyData</code> is set, this will resolve to the <code>data</code>
      * object only.
@@ -547,76 +586,6 @@ module.exports.MatrixHttpApi.prototype = {
     },
 
     /**
-     * Perform an authorised request to the homeserver with a specific path
-     * prefix which overrides the default for this call only. Useful for hitting
-     * different Matrix Client-Server versions.
-     * @param {Function} callback Optional. The callback to invoke on
-     * success/failure. See the promise return values for more information.
-     * @param {string} method The HTTP method e.g. "GET".
-     * @param {string} path The HTTP path <b>after</b> the supplied prefix e.g.
-     * "/createRoom".
-     * @param {Object} queryParams A dict of query params (these will NOT be
-     * urlencoded).
-     * @param {Object} data The HTTP JSON body.
-     * @param {string} prefix The full prefix to use e.g.
-     * "/_matrix/client/v2_alpha".
-     * @param {Number=} localTimeoutMs The maximum amount of time to wait before
-     * timing out the request. If not specified, there is no timeout.
-     * @return {module:client.Promise} Resolves to <code>{data: {Object},
-     * headers: {Object}, code: {Number}}</code>.
-     * If <code>onlyData</code> is set, this will resolve to the <code>data</code>
-     * object only.
-     * @return {module:http-api.MatrixError} Rejects with an error if a problem
-     * occurred. This includes network problems and Matrix-specific error JSON.
-     *
-     * @deprecated prefer authedRequest with opts.prefix
-     */
-    authedRequestWithPrefix: function(callback, method, path, queryParams, data,
-                                      prefix, localTimeoutMs) {
-        return this.authedRequest(
-            callback, method, path, queryParams, data, {
-                localTimeoutMs: localTimeoutMs,
-                prefix: prefix,
-            },
-        );
-    },
-
-    /**
-     * Perform a request to the homeserver without any credentials but with a
-     * specific path prefix which overrides the default for this call only.
-     * Useful for hitting different Matrix Client-Server versions.
-     * @param {Function} callback Optional. The callback to invoke on
-     * success/failure. See the promise return values for more information.
-     * @param {string} method The HTTP method e.g. "GET".
-     * @param {string} path The HTTP path <b>after</b> the supplied prefix e.g.
-     * "/createRoom".
-     * @param {Object} queryParams A dict of query params (these will NOT be
-     * urlencoded).
-     * @param {Object} data The HTTP JSON body.
-     * @param {string} prefix The full prefix to use e.g.
-     * "/_matrix/client/v2_alpha".
-     * @param {Number=} localTimeoutMs The maximum amount of time to wait before
-     * timing out the request. If not specified, there is no timeout.
-     * @return {module:client.Promise} Resolves to <code>{data: {Object},
-     * headers: {Object}, code: {Number}}</code>.
-     * If <code>onlyData</code> is set, this will resolve to the <code>data</code>
-     * object only.
-     * @return {module:http-api.MatrixError} Rejects with an error if a problem
-     * occurred. This includes network problems and Matrix-specific error JSON.
-     *
-     * @deprecated prefer request with opts.prefix
-     */
-    requestWithPrefix: function(callback, method, path, queryParams, data, prefix,
-                                localTimeoutMs) {
-        return this.request(
-            callback, method, path, queryParams, data, {
-                localTimeoutMs: localTimeoutMs,
-                prefix: prefix,
-            },
-        );
-    },
-
-    /**
      * Perform a request to an arbitrary URL.
      * @param {Function} callback Optional. The callback to invoke on
      * success/failure. See the promise return values for more information.
@@ -626,7 +595,7 @@ module.exports.MatrixHttpApi.prototype = {
      * @param {Object=} queryParams A dict of query params (these will NOT be
      * urlencoded). If unspecified, there will be no query params.
      *
-     * @param {Object} data The HTTP JSON body.
+     * @param {Object} [data] The HTTP JSON body.
      *
      * @param {Object=} opts additional options
      *
@@ -638,7 +607,7 @@ module.exports.MatrixHttpApi.prototype = {
      *
      * @param {Object=} opts.headers map of additional request headers
      *
-     * @return {module:client.Promise} Resolves to <code>{data: {Object},
+     * @return {Promise} Resolves to <code>{data: {Object},
      * headers: {Object}, code: {Number}}</code>.
      * If <code>onlyData</code> is set, this will resolve to the <code>data</code>
      * object only.
@@ -702,7 +671,7 @@ module.exports.MatrixHttpApi.prototype = {
      * @param {function=} opts.bodyParser function to parse the body of the
      *    response before passing it to the promise and callback.
      *
-     * @return {module:client.Promise} a promise which resolves to either the
+     * @return {Promise} a promise which resolves to either the
      * response object (if this.opts.onlyData is truthy), or the parsed
      * body. Rejects
      */
@@ -716,12 +685,10 @@ module.exports.MatrixHttpApi.prototype = {
 
         const self = this;
         if (this.opts.extraParams) {
-            for (const key in this.opts.extraParams) {
-                if (!this.opts.extraParams.hasOwnProperty(key)) {
-                    continue;
-                }
-                queryParams[key] = this.opts.extraParams[key];
-            }
+            queryParams = {
+              ...queryParams,
+              ...this.opts.extraParams,
+            };
         }
 
         const headers = utils.extend({}, opts.headers || {});
@@ -750,7 +717,7 @@ module.exports.MatrixHttpApi.prototype = {
             }
         }
 
-        const defer = Promise.defer();
+        const defer = utils.defer();
 
         let timeoutId;
         let timedOut = false;
@@ -767,7 +734,7 @@ module.exports.MatrixHttpApi.prototype = {
                     if (req && req.abort) {
                         req.abort();
                     }
-                    defer.reject(new module.exports.MatrixError({
+                    defer.reject(new MatrixError({
                         error: "Locally timed out waiting for a response",
                         errcode: "ORG.MATRIX.JSSDK_TIMEOUT",
                         timeout: localTimeoutMs,
@@ -786,6 +753,8 @@ module.exports.MatrixHttpApi.prototype = {
                     method: method,
                     withCredentials: false,
                     qs: queryParams,
+                    qsStringifyOptions: opts.qsStringifyOptions,
+                    useQuerystring: true,
                     body: data,
                     json: false,
                     timeout: localTimeoutMs,
@@ -855,6 +824,17 @@ const requestCallback = function(
     userDefinedCallback = userDefinedCallback || function() {};
 
     return function(err, response, body) {
+        if (err) {
+            // the unit tests use matrix-mock-request, which throw the string "aborted" when aborting a request.
+            // See https://github.com/matrix-org/matrix-mock-request/blob/3276d0263a561b5b8326b47bae720578a2c7473a/src/index.js#L48
+            const aborted = err.name === "AbortError" || err === "aborted";
+            if (!aborted && !(err instanceof MatrixError)) {
+                // browser-request just throws normal Error objects,
+                // not `TypeError`s like fetch does. So just assume any
+                // error is due to the connection.
+                err = new ConnectionError("request failed", err);
+            }
+        }
         if (!err) {
             try {
                 if (response.statusCode >= 400) {
@@ -902,7 +882,8 @@ function parseErrorResponse(response, body) {
     let err;
     if (contentType) {
         if (contentType.type === 'application/json') {
-            err = new module.exports.MatrixError(JSON.parse(body));
+            const jsonBody = typeof(body) === 'object' ? body : JSON.parse(body);
+            err = new MatrixError(jsonBody);
         } else if (contentType.type === 'text/plain') {
             err = new Error(`Server returned ${httpStatus} error: ${body}`);
         }
@@ -941,7 +922,7 @@ function getResponseContentType(response) {
 
     try {
         return parseContentType(contentType);
-    } catch(e) {
+    } catch (e) {
         throw new Error(`Error parsing Content-Type '${contentType}': ${e}`);
     }
 }
@@ -957,13 +938,76 @@ function getResponseContentType(response) {
  * @prop {Object} data The raw Matrix error JSON used to construct this object.
  * @prop {integer} httpStatus The numeric HTTP status code given
  */
-module.exports.MatrixError = function MatrixError(errorJson) {
-    errorJson = errorJson || {};
-    this.errcode = errorJson.errcode;
-    this.name = errorJson.errcode || "Unknown error code";
-    this.message = errorJson.error || "Unknown message";
-    this.data = errorJson;
-};
-module.exports.MatrixError.prototype = Object.create(Error.prototype);
-/** */
-module.exports.MatrixError.prototype.constructor = module.exports.MatrixError;
+export class MatrixError extends Error {
+    constructor(errorJson) {
+        errorJson = errorJson || {};
+        super(`MatrixError: ${errorJson.errcode}`);
+        this.errcode = errorJson.errcode;
+        this.name = errorJson.errcode || "Unknown error code";
+        this.message = errorJson.error || "Unknown message";
+        this.data = errorJson;
+    }
+}
+
+/**
+ * Construct a ConnectionError. This is a JavaScript Error indicating
+ * that a request failed because of some error with the connection, either
+ * CORS was not correctly configured on the server, the server didn't response,
+ * the request timed out, or the internet connection on the client side went down.
+ * @constructor
+ */
+export class ConnectionError extends Error {
+    constructor(message, cause = undefined) {
+        super(message + (cause ? `: ${cause.message}` : ""));
+        this._cause = cause;
+    }
+
+    get name() {
+        return "ConnectionError";
+    }
+
+    get cause() {
+        return this._cause;
+    }
+}
+
+export class AbortError extends Error {
+    constructor() {
+        super("Operation aborted");
+    }
+
+    get name() {
+        return "AbortError";
+    }
+}
+
+/**
+ * Retries a network operation run in a callback.
+ * @param  {number}   maxAttempts maximum attempts to try
+ * @param  {Function} callback    callback that returns a promise of the network operation. If rejected with ConnectionError, it will be retried by calling the callback again.
+ * @return {any} the result of the network operation
+ * @throws {ConnectionError} If after maxAttempts the callback still throws ConnectionError
+ */
+export async function retryNetworkOperation(maxAttempts, callback) {
+    let attempts = 0;
+    let lastConnectionError = null;
+    while (attempts < maxAttempts) {
+        try {
+            if (attempts > 0) {
+                const timeout = 1000 * Math.pow(2, attempts);
+                logger.log(`network operation failed ${attempts} times,` +
+                    ` retrying in ${timeout}ms...`);
+                await new Promise(r => setTimeout(r, timeout));
+            }
+            return await callback();
+        } catch (err) {
+            if (err instanceof ConnectionError) {
+                attempts += 1;
+                lastConnectionError = err;
+            } else {
+                throw err;
+            }
+        }
+    }
+    throw lastConnectionError;
+}

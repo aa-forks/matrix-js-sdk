@@ -1,8 +1,7 @@
 Matrix Javascript SDK
 =====================
-[![Build Status](http://matrix.org/jenkins/buildStatus/icon?job=JavascriptSDK)](http://matrix.org/jenkins/job/JavascriptSDK/)
 
-This is the [Matrix](https://matrix.org) Client-Server v1/v2 alpha SDK for
+This is the [Matrix](https://matrix.org) Client-Server r0 SDK for
 JavaScript. This SDK can be run in a browser or in Node.js.
 
 Quickstart
@@ -10,29 +9,94 @@ Quickstart
 
 In a browser
 ------------
-Download either the full or minified version from
+Download the browser version from
 https://github.com/matrix-org/matrix-js-sdk/releases/latest and add that as a
 ``<script>`` to your page. There will be a global variable ``matrixcs``
 attached to ``window`` through which you can access the SDK. See below for how to
 include libolm to enable end-to-end-encryption.
+
+The browser bundle supports recent versions of browsers. Typically this is ES2015
+or `> 0.5%, last 2 versions, Firefox ESR, not dead` if using 
+[browserlists](https://github.com/browserslist/browserslist).
 
 Please check [the working browser example](examples/browser) for more information.
 
 In Node.js
 ----------
 
-``npm install matrix-js-sdk``
+Ensure you have the latest LTS version of Node.js installed.
+
+This SDK targets Node 10 for compatibility, which translates to ES6. If you're using
+a bundler like webpack you'll likely have to transpile dependencies, including this
+SDK, to match your target browsers.
+
+Using `yarn` instead of `npm` is recommended. Please see the Yarn [install guide](https://classic.yarnpkg.com/en/docs/install) 
+if you do not have it already.
+
+``yarn add matrix-js-sdk``
 
 ```javascript
-  var sdk = require("matrix-js-sdk");
-  var client = sdk.createClient("https://matrix.org");
+  import * as sdk from "matrix-js-sdk";
+  const client = sdk.createClient("https://matrix.org");
   client.publicRooms(function(err, data) {
     console.log("Public Rooms: %s", JSON.stringify(data));
   });
 ```
+
 See below for how to include libolm to enable end-to-end-encryption. Please check
 [the Node.js terminal app](examples/node) for a more complex example.
 
+To start the client:
+
+```javascript
+await client.startClient({initialSyncLimit: 10});
+```
+
+You can perform a call to `/sync` to get the current state of the client:
+
+```javascript
+client.once('sync', function(state, prevState, res) {
+    if(state === 'PREPARED') {
+        console.log("prepared");
+    } else {
+        console.log(state);
+        process.exit(1);
+    }
+});
+```
+
+To send a message:
+
+```javascript
+const content = {
+    "body": "message text",
+    "msgtype": "m.text"
+};
+client.sendEvent("roomId", "m.room.message", content, "", (err, res) => {
+    console.log(err);
+});
+```
+
+To listen for message events:
+
+```javascript
+client.on("Room.timeline", function(event, room, toStartOfTimeline) {
+  if (event.getType() !== "m.room.message") {
+    return; // only use messages
+  }
+  console.log(event.event.content.body);
+});
+```
+
+By default, the `matrix-js-sdk` client uses the `MemoryStore` to store events as they are received. For example to iterate through the currently stored timeline for a room:
+
+```javascript
+Object.keys(client.store.rooms).forEach((roomId) => {
+  client.getRoom(roomId).timeline.forEach(t => {
+      console.log(t.event);
+  });
+});
+```
 
 What does this SDK do?
 ----------------------
@@ -106,7 +170,7 @@ which will be fulfilled in the future.
 The typical usage is something like:
 
 ```javascript
-  matrixClient.someMethod(arg1, arg2).done(function(result) {
+  matrixClient.someMethod(arg1, arg2).then(function(result) {
     ...
   });
 ```
@@ -118,10 +182,8 @@ you can pass the result of the promise into it with something like:
   matrixClient.someMethod(arg1, arg2).nodeify(callback);
 ```
 
-The main thing to note is that it is an error to discard the result of a
-promise-returning function, as that will cause exceptions to go unobserved. If
-you have nothing better to do with the result, just call ``.done()`` on it. See
-http://documentup.com/kriskowal/q/#the-end for more information.
+The main thing to note is that it is problematic to discard the result of a
+promise-returning function, as that will cause exceptions to go unobserved.
 
 Methods which return a promise show this in their documentation.
 
@@ -136,10 +198,10 @@ This section provides some useful code snippets which demonstrate the
 core functionality of the SDK. These examples assume the SDK is setup like this:
 
 ```javascript
-   var sdk = require("matrix-js-sdk");
-   var myUserId = "@example:localhost";
-   var myAccessToken = "QGV4YW1wbGU6bG9jYWxob3N0.qPEvLuYfNBjxikiCjP";
-   var matrixClient = sdk.createClient({
+   import * as sdk from "matrix-js-sdk";
+   const myUserId = "@example:localhost";
+   const myAccessToken = "QGV4YW1wbGU6bG9jYWxob3N0.qPEvLuYfNBjxikiCjP";
+   const matrixClient = sdk.createClient({
        baseUrl: "http://localhost:8008",
        accessToken: myAccessToken,
        userId: myUserId
@@ -151,7 +213,7 @@ core functionality of the SDK. These examples assume the SDK is setup like this:
 ```javascript
    matrixClient.on("RoomMember.membership", function(event, member) {
        if (member.membership === "invite" && member.userId === myUserId) {
-           matrixClient.joinRoom(member.roomId).done(function() {
+           matrixClient.joinRoom(member.roomId).then(function() {
                console.log("Auto-joined %s", member.roomId);
            });
        }
@@ -192,11 +254,11 @@ Output:
 
 ```javascript
    matrixClient.on("RoomState.members", function(event, state, member) {
-       var room = matrixClient.getRoom(state.roomId);
+       const room = matrixClient.getRoom(state.roomId);
        if (!room) {
            return;
        }
-       var memberList = state.getMembers();
+       const memberList = state.getMembers();
        console.log(room.name);
        console.log(Array(room.name.length + 1).join("="));  // underline
        for (var i = 0; i < memberList.length; i++) {
@@ -231,7 +293,7 @@ This SDK uses JSDoc3 style comments. You can manually build and
 host the API reference from the source files like this:
 
 ```
-  $ npm run gendoc
+  $ yarn gendoc
   $ cd .jsdoc
   $ python -m SimpleHTTPServer 8005
 ```
@@ -242,10 +304,10 @@ End-to-end encryption support
 =============================
 
 The SDK supports end-to-end encryption via the Olm and Megolm protocols, using
-[libolm](http://matrix.org/git/olm). It is left up to the application to make
-libolm available, via the ``Olm`` global.
+[libolm](https://gitlab.matrix.org/matrix-org/olm). It is left up to the
+application to make libolm available, via the ``Olm`` global.
 
-It is also necessry to call ``matrixClient.initCrypto()`` after creating a new
+It is also necessary to call ``matrixClient.initCrypto()`` after creating a new
 ``MatrixClient`` (but **before** calling ``matrixClient.startClient()``) to
 initialise the crypto layer.
 
@@ -262,20 +324,20 @@ specification.
 
 To provide the Olm library in a browser application:
 
- * download the transpiled libolm (from https://matrix.org/packages/npm/olm/).
+ * download the transpiled libolm (from https://packages.matrix.org/npm/olm/).
  * load ``olm.js`` as a ``<script>`` *before* ``browser-matrix.js``.
- 
+
 To provide the Olm library in a node.js application:
 
- * ``npm install https://matrix.org/packages/npm/olm/olm-2.2.2.tgz``
+ * ``yarn add https://packages.matrix.org/npm/olm/olm-3.1.4.tgz``
    (replace the URL with the latest version you want to use from
-    https://matrix.org/packages/npm/olm/)
+    https://packages.matrix.org/npm/olm/)
  * ``global.Olm = require('olm');`` *before* loading ``matrix-js-sdk``.
 
-If you want to package Olm as dependency for your node.js application, you
-can use ``npm install https://matrix.org/packages/npm/olm/olm-2.2.2.tgz 
---save-optional`` (if your application also works without e2e crypto enabled)
-or ``--save`` (if it doesn't) to do so.
+If you want to package Olm as dependency for your node.js application, you can
+use ``yarn add https://packages.matrix.org/npm/olm/olm-3.1.4.tgz``. If your
+application also works without e2e crypto enabled, add ``--optional`` to mark it
+as an optional dependency.
 
 
 Contributing
@@ -285,7 +347,7 @@ want to use this SDK, skip this section.*
 
 First, you need to pull in the right build tools:
 ```
- $ npm install
+ $ yarn install
 ```
 
 Building
@@ -293,20 +355,15 @@ Building
 
 To build a browser version from scratch when developing::
 ```
- $ npm run build
-```
-
-To constantly do builds when files are modified (using ``watchify``)::
-```
- $ npm run watch
+ $ yarn build
 ```
 
 To run tests (Jasmine)::
 ```
- $ npm test
+ $ yarn test
 ```
 
 To run linting:
 ```
- $ npm run lint
+ $ yarn lint
 ```

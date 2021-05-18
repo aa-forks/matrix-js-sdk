@@ -1,22 +1,18 @@
 // This file had a function whose name is all caps, which displeases eslint
 /* eslint new-cap: "off" */
 
-import 'source-map-support/register';
-import Promise from 'bluebird';
-const sdk = require("../..");
-const MatrixScheduler = sdk.MatrixScheduler;
-const MatrixError = sdk.MatrixError;
-const utils = require("../test-utils");
+import {defer} from '../../src/utils';
+import {MatrixError} from "../../src/http-api";
+import {MatrixScheduler} from "../../src/scheduler";
+import * as utils from "../test-utils";
 
-import expect from 'expect';
-import lolex from 'lolex';
+jest.useFakeTimers();
 
 describe("MatrixScheduler", function() {
-    let clock;
     let scheduler;
     let retryFn;
     let queueFn;
-    let defer;
+    let deferred;
     const roomId = "!foo:bar";
     const eventA = utils.mkMessage({
         user: "@alice:bar", room: roomId, event: true,
@@ -26,8 +22,6 @@ describe("MatrixScheduler", function() {
     });
 
     beforeEach(function() {
-        utils.beforeEach(this); // eslint-disable-line no-invalid-this
-        clock = lolex.install();
         scheduler = new MatrixScheduler(function(ev, attempts, err) {
             if (retryFn) {
                 return retryFn(ev, attempts, err);
@@ -41,46 +35,44 @@ describe("MatrixScheduler", function() {
         });
         retryFn = null;
         queueFn = null;
-        defer = Promise.defer();
+        deferred = defer();
     });
 
-    afterEach(function() {
-        clock.uninstall();
-    });
-
-    it("should process events in a queue in a FIFO manner", function(done) {
+    it("should process events in a queue in a FIFO manner", async function() {
         retryFn = function() {
             return 0;
         };
         queueFn = function() {
             return "one_big_queue";
         };
-        const deferA = Promise.defer();
-        const deferB = Promise.defer();
-        let resolvedA = false;
+        const deferA = defer();
+        const deferB = defer();
+        let yieldedA = false;
         scheduler.setProcessFunction(function(event) {
-            if (resolvedA) {
+            if (yieldedA) {
                 expect(event).toEqual(eventB);
                 return deferB.promise;
             } else {
+                yieldedA = true;
                 expect(event).toEqual(eventA);
                 return deferA.promise;
             }
         });
-        scheduler.queueEvent(eventA);
-        scheduler.queueEvent(eventB).done(function() {
-            expect(resolvedA).toBe(true);
-            done();
-        });
-        deferA.resolve({});
-        resolvedA = true;
-        deferB.resolve({});
+        const abPromise = Promise.all([
+            scheduler.queueEvent(eventA),
+            scheduler.queueEvent(eventB),
+        ]);
+        deferB.resolve({b: true});
+        deferA.resolve({a: true});
+        const [a, b] = await abPromise;
+        expect(a.a).toEqual(true);
+        expect(b.b).toEqual(true);
     });
 
     it("should invoke the retryFn on failure and wait the amount of time specified",
-    function(done) {
+    async function() {
         const waitTimeMs = 1500;
-        const retryDefer = Promise.defer();
+        const retryDefer = defer();
         retryFn = function() {
             retryDefer.resolve();
             return waitTimeMs;
@@ -94,27 +86,29 @@ describe("MatrixScheduler", function() {
             procCount += 1;
             if (procCount === 1) {
                 expect(ev).toEqual(eventA);
-                return defer.promise;
+                return deferred.promise;
             } else if (procCount === 2) {
-                // don't care about this defer
-                return Promise.defer().promise;
+                // don't care about this deferred
+                return new Promise();
             }
             expect(procCount).toBeLessThan(3);
         });
 
         scheduler.queueEvent(eventA);
+        // as queueing doesn't start processing synchronously anymore (see commit bbdb5ac)
+        // wait just long enough before it does
+        await Promise.resolve();
         expect(procCount).toEqual(1);
-        defer.reject({});
-        retryDefer.promise.done(function() {
-            expect(procCount).toEqual(1);
-            clock.tick(waitTimeMs);
-            expect(procCount).toEqual(2);
-            done();
-        });
+        deferred.reject({});
+        await retryDefer.promise;
+        expect(procCount).toEqual(1);
+        jest.advanceTimersByTime(waitTimeMs);
+        await Promise.resolve();
+        expect(procCount).toEqual(2);
     });
 
     it("should give up if the retryFn on failure returns -1 and try the next event",
-    function(done) {
+    async function() {
         // Queue A & B.
         // Reject A and return -1 on retry.
         // Expect B to be tried next and the promise for A to be rejected.
@@ -122,11 +116,11 @@ describe("MatrixScheduler", function() {
             return -1;
         };
         queueFn = function() {
- return "yep";
-};
+            return "yep";
+        };
 
-        const deferA = Promise.defer();
-        const deferB = Promise.defer();
+        const deferA = defer();
+        const deferB = defer();
         let procCount = 0;
         scheduler.setProcessFunction(function(ev) {
             procCount += 1;
@@ -142,13 +136,17 @@ describe("MatrixScheduler", function() {
 
         const globalA = scheduler.queueEvent(eventA);
         scheduler.queueEvent(eventB);
-
+        // as queueing doesn't start processing synchronously anymore (see commit bbdb5ac)
+        // wait just long enough before it does
+        await Promise.resolve();
         expect(procCount).toEqual(1);
         deferA.reject({});
-        globalA.catch(function() {
+        try {
+            await globalA;
+        } catch (err) {
+            await Promise.resolve();
             expect(procCount).toEqual(2);
-            done();
-        });
+        }
     });
 
     it("should treat each queue separately", function(done) {
@@ -177,14 +175,14 @@ describe("MatrixScheduler", function() {
         const expectOrder = [
             eventA.getId(), eventB.getId(), eventD.getId(),
         ];
-        const deferA = Promise.defer();
+        const deferA = defer();
         scheduler.setProcessFunction(function(event) {
             const id = expectOrder.shift();
             expect(id).toEqual(event.getId());
             if (expectOrder.length === 0) {
                 done();
             }
-            return id === eventA.getId() ? deferA.promise : defer.promise;
+            return id === eventA.getId() ? deferA.promise : deferred.promise;
         });
         scheduler.queueEvent(eventA);
         scheduler.queueEvent(eventB);
@@ -195,7 +193,7 @@ describe("MatrixScheduler", function() {
         setTimeout(function() {
             deferA.resolve({});
         }, 1000);
-        clock.tick(1000);
+        jest.advanceTimersByTime(1000);
     });
 
     describe("queueEvent", function() {
@@ -298,9 +296,13 @@ describe("MatrixScheduler", function() {
             scheduler.setProcessFunction(function(ev) {
                 procCount += 1;
                 expect(ev).toEqual(eventA);
-                return defer.promise;
+                return deferred.promise;
             });
-            expect(procCount).toEqual(1);
+            // as queueing doesn't start processing synchronously anymore (see commit bbdb5ac)
+            // wait just long enough before it does
+            Promise.resolve().then(() => {
+                expect(procCount).toEqual(1);
+            });
         });
 
         it("should not call the processFn if there are no queued events", function() {
@@ -310,7 +312,7 @@ describe("MatrixScheduler", function() {
             let procCount = 0;
             scheduler.setProcessFunction(function(ev) {
                 procCount += 1;
-                return defer.promise;
+                return deferred.promise;
             });
             expect(procCount).toEqual(0);
         });

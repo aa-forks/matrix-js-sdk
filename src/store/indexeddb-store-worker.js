@@ -1,6 +1,7 @@
 /*
 Copyright 2017 Vector Creations Ltd
 Copyright 2018 New Vector Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,8 +16,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import Promise from 'bluebird';
-import LocalIndexedDBStoreBackend from "./indexeddb-local-backend.js";
+import {LocalIndexedDBStoreBackend} from "./indexeddb-local-backend.js";
+import {logger} from '../logger';
 
 /**
  * This class lives in the webworker and drives a LocalIndexedDBStoreBackend
@@ -33,7 +34,7 @@ import LocalIndexedDBStoreBackend from "./indexeddb-local-backend.js";
  * avoid a dependency on the whole js-sdk.
  *
  */
-class IndexedDBStoreWorker {
+export class IndexedDBStoreWorker {
     /**
      * @param {function} postMessage The web worker postMessage function that
      * should be used to communicate back to the main script.
@@ -67,6 +68,9 @@ class IndexedDBStoreWorker {
             case 'connect':
                 prom = this.backend.connect();
                 break;
+            case 'isNewlyCreated':
+                prom = this.backend.isNewlyCreated();
+                break;
             case 'clearDatabase':
                 prom = this.backend.clearDatabase().then((result) => {
                     // This returns special classes which can't be cloned
@@ -92,10 +96,25 @@ class IndexedDBStoreWorker {
             case 'getNextBatchToken':
                 prom = this.backend.getNextBatchToken();
                 break;
+            case 'getOutOfBandMembers':
+                prom = this.backend.getOutOfBandMembers(msg.args[0]);
+                break;
+            case 'clearOutOfBandMembers':
+                prom = this.backend.clearOutOfBandMembers(msg.args[0]);
+                break;
+            case 'setOutOfBandMembers':
+                prom = this.backend.setOutOfBandMembers(msg.args[0], msg.args[1]);
+                break;
+            case 'getClientOptions':
+                prom = this.backend.getClientOptions();
+                break;
+            case 'storeClientOptions':
+                prom = this.backend.storeClientOptions(msg.args[0]);
+                break;
         }
 
         if (prom === undefined) {
-            postMessage({
+            this.postMessage({
                 command: 'cmd_fail',
                 seq: msg.seq,
                 // Can't be an Error because they're not structured cloneable
@@ -104,23 +123,24 @@ class IndexedDBStoreWorker {
             return;
         }
 
-        prom.done((ret) => {
+        prom.then((ret) => {
             this.postMessage.call(null, {
                 command: 'cmd_success',
                 seq: msg.seq,
                 result: ret,
             });
         }, (err) => {
-            console.error("Error running command: "+msg.command);
-            console.error(err);
+            logger.error("Error running command: "+msg.command);
+            logger.error(err);
             this.postMessage.call(null, {
                 command: 'cmd_fail',
                 seq: msg.seq,
                 // Just send a string because Error objects aren't cloneable
-                error: "Error running command",
+                error: {
+                    message: err.message,
+                    name: err.name,
+                },
             });
         });
     }
 }
-
-module.exports = IndexedDBStoreWorker;

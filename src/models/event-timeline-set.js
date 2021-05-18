@@ -1,5 +1,6 @@
 /*
 Copyright 2016 OpenMarket Ltd
+Copyright 2019 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,13 +14,17 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-"use strict";
+
 /**
  * @module models/event-timeline-set
  */
-const EventEmitter = require("events").EventEmitter;
-const utils = require("../utils");
-const EventTimeline = require("./event-timeline");
+
+import {EventEmitter} from "events";
+import {EventTimeline} from "./event-timeline";
+import {EventStatus} from "./event";
+import * as utils from "../utils";
+import {logger} from '../logger';
+import {Relations} from './relations';
 
 // var DEBUG = false;
 const DEBUG = true;
@@ -27,7 +32,7 @@ const DEBUG = true;
 let debuglog;
 if (DEBUG) {
     // using bind means that we get to keep useful line numbers in the console
-    debuglog = console.log.bind(console);
+    debuglog = logger.log.bind(logger);
 } else {
     debuglog = function() {};
 }
@@ -54,25 +59,48 @@ if (DEBUG) {
  * map from event_id to timeline and index.
  *
  * @constructor
- * @param {?Room} room      the optional room for this timelineSet
- * @param {Object} opts     hash of options inherited from Room.
- *      opts.timelineSupport gives whether timeline support is enabled
- *      opts.filter is the filter object, if any, for this timelineSet.
+ * @param {?Room} room
+ * Room for this timelineSet. May be null for non-room cases, such as the
+ * notification timeline.
+ * @param {Object} opts Options inherited from Room.
+ *
+ * @param {boolean} [opts.timelineSupport = false]
+ * Set to true to enable improved timeline support.
+ * @param {Object} [opts.filter = null]
+ * The filter object, if any, for this timelineSet.
+ * @param {boolean} [opts.unstableClientRelationAggregation = false]
+ * Optional. Set to true to enable client-side aggregation of event relations
+ * via `getRelationsForEvent`.
+ * This feature is currently unstable and the API may change without notice.
  */
-function EventTimelineSet(room, opts) {
+export function EventTimelineSet(room, opts) {
     this.room = room;
 
     this._timelineSupport = Boolean(opts.timelineSupport);
     this._liveTimeline = new EventTimeline(this);
+    this._unstableClientRelationAggregation = !!opts.unstableClientRelationAggregation;
 
     // just a list - *not* ordered.
     this._timelines = [this._liveTimeline];
     this._eventIdToTimeline = {};
 
     this._filter = opts.filter || null;
+
+    if (this._unstableClientRelationAggregation) {
+        // A tree of objects to access a set of relations for an event, as in:
+        // this._relations[relatesToEventId][relationType][relationEventType]
+        this._relations = {};
+    }
 }
 utils.inherits(EventTimelineSet, EventEmitter);
 
+/**
+ * Get all the timelines in this set
+ * @return {module:models/event-timeline~EventTimeline[]} the timelines in this set
+ */
+EventTimelineSet.prototype.getTimelines = function() {
+    return this._timelines;
+};
 /**
  * Get the filter object this timeline set is filtered on, if any
  * @return {?Filter} the optional filter for this timelineSet
@@ -168,49 +196,19 @@ EventTimelineSet.prototype.resetLiveTimeline = function(
     // if timeline support is disabled, forget about the old timelines
     const resetAllTimelines = !this._timelineSupport || !forwardPaginationToken;
 
-    let newTimeline;
+    const oldTimeline = this._liveTimeline;
+    const newTimeline = resetAllTimelines ?
+        oldTimeline.forkLive(EventTimeline.FORWARDS) :
+        oldTimeline.fork(EventTimeline.FORWARDS);
+
     if (resetAllTimelines) {
-        newTimeline = new EventTimeline(this);
         this._timelines = [newTimeline];
         this._eventIdToTimeline = {};
     } else {
-        newTimeline = this.addTimeline();
+        this._timelines.push(newTimeline);
     }
 
-    const oldTimeline = this._liveTimeline;
-
-    // Collect the state events from the old timeline
-    const evMap = oldTimeline.getState(EventTimeline.FORWARDS).events;
-    const events = [];
-    for (const evtype in evMap) {
-        if (!evMap.hasOwnProperty(evtype)) {
-            continue;
-        }
-        for (const stateKey in evMap[evtype]) {
-            if (!evMap[evtype].hasOwnProperty(stateKey)) {
-                continue;
-            }
-            events.push(evMap[evtype][stateKey]);
-        }
-    }
-
-    // Use those events to initialise the state of the new live timeline
-    newTimeline.initialiseState(events);
-
-    const freshEndState = newTimeline._endState;
-    // Now clobber the end state of the new live timeline with that from the
-    // previous live timeline. It will be identical except that we'll keep
-    // using the same RoomMember objects for the 'live' set of members with any
-    // listeners still attached
-    newTimeline._endState = oldTimeline._endState;
-
-    // If we're not resetting all timelines, we need to fix up the old live timeline
-    if (!resetAllTimelines) {
-        // Firstly, we just stole the old timeline's end state, so it needs a new one.
-        // Just swap them around and give it the one we just generated for the
-        // new live timeline.
-        oldTimeline._endState = freshEndState;
-
+    if (forwardPaginationToken) {
         // Now set the forward pagination token on the old live timeline
         // so it can be forward-paginated.
         oldTimeline.setPaginationToken(
@@ -251,7 +249,7 @@ EventTimelineSet.prototype.findEventById = function(eventId) {
     if (!tl) {
         return undefined;
     }
-    return utils.findElement(tl.getEvents(), function(ev) {
+    return tl.getEvents().find(function(ev) {
         return ev.getId() == eventId;
     });
 };
@@ -435,11 +433,38 @@ EventTimelineSet.prototype.addEventsToTimeline = function(events, toStartOfTimel
         }
 
         // time to join the timelines.
-        console.info("Already have timeline for " + eventId +
+        logger.info("Already have timeline for " + eventId +
                      " - joining timeline " + timeline + " to " +
                      existingTimeline);
+
+        // Variables to keep the line length limited below.
+        const existingIsLive = existingTimeline === this._liveTimeline;
+        const timelineIsLive = timeline === this._liveTimeline;
+
+        const backwardsIsLive = direction === EventTimeline.BACKWARDS && existingIsLive;
+        const forwardsIsLive = direction === EventTimeline.FORWARDS && timelineIsLive;
+
+        if (backwardsIsLive || forwardsIsLive) {
+            // The live timeline should never be spliced into a non-live position.
+            // We use independent logging to better discover the problem at a glance.
+            if (backwardsIsLive) {
+                logger.warn(
+                    "Refusing to set a preceding existingTimeLine on our " +
+                    "timeline as the existingTimeLine is live (" + existingTimeline + ")",
+                );
+            }
+            if (forwardsIsLive) {
+                logger.warn(
+                    "Refusing to set our preceding timeline on a existingTimeLine " +
+                    "as our timeline is live (" + timeline + ")",
+                );
+            }
+            continue; // abort splicing - try next event
+        }
+
         timeline.setNeighbouringTimeline(existingTimeline, direction);
         existingTimeline.setNeighbouringTimeline(timeline, inverseDirection);
+
         timeline = existingTimeline;
         didUpdate = true;
     }
@@ -448,6 +473,14 @@ EventTimelineSet.prototype.addEventsToTimeline = function(events, toStartOfTimel
     // new information, we update the pagination token for whatever
     // timeline we ended up on.
     if (lastEventWasNew || !didUpdate) {
+        if (direction === EventTimeline.FORWARDS && timeline === this._liveTimeline) {
+            logger.warn({lastEventWasNew, didUpdate}); // for debugging
+            logger.warn(
+                `Refusing to set forwards pagination token of live timeline ` +
+                `${timeline} to ${paginationToken}`,
+            );
+            return;
+        }
         timeline.setPaginationToken(paginationToken, direction);
     }
 };
@@ -457,8 +490,9 @@ EventTimelineSet.prototype.addEventsToTimeline = function(events, toStartOfTimel
  *
  * @param {MatrixEvent} event Event to be added
  * @param {string?} duplicateStrategy 'ignore' or 'replace'
+ * @param {boolean} fromCache whether the sync response came from cache
  */
-EventTimelineSet.prototype.addLiveEvent = function(event, duplicateStrategy) {
+EventTimelineSet.prototype.addLiveEvent = function(event, duplicateStrategy, fromCache) {
     if (this._filter) {
         const events = this._filter.filterRoomTimeline([event]);
         if (!events.length) {
@@ -496,7 +530,7 @@ EventTimelineSet.prototype.addLiveEvent = function(event, duplicateStrategy) {
         return;
     }
 
-    this.addEventToTimeline(event, this._liveTimeline, false);
+    this.addEventToTimeline(event, this._liveTimeline, false, fromCache);
 };
 
 /**
@@ -508,18 +542,22 @@ EventTimelineSet.prototype.addLiveEvent = function(event, duplicateStrategy) {
  * @param {MatrixEvent} event
  * @param {EventTimeline} timeline
  * @param {boolean} toStartOfTimeline
+ * @param {boolean} fromCache whether the sync response came from cache
  *
  * @fires module:client~MatrixClient#event:"Room.timeline"
  */
 EventTimelineSet.prototype.addEventToTimeline = function(event, timeline,
-                                                         toStartOfTimeline) {
+                                                         toStartOfTimeline, fromCache) {
     const eventId = event.getId();
     timeline.addEvent(event, toStartOfTimeline);
     this._eventIdToTimeline[eventId] = timeline;
 
+    this.setRelationsTarget(event);
+    this.aggregateRelations(event);
+
     const data = {
         timeline: timeline,
-        liveEvent: !toStartOfTimeline && timeline == this._liveTimeline,
+        liveEvent: !toStartOfTimeline && timeline == this._liveTimeline && !fromCache,
     };
     this.emit("Room.timeline", event, this.room,
               Boolean(toStartOfTimeline), false, data);
@@ -609,7 +647,8 @@ EventTimelineSet.prototype.compareEventOrdering = function(eventId1, eventId2) {
     if (timeline1 === timeline2) {
         // both events are in the same timeline - figure out their
         // relative indices
-        let idx1, idx2;
+        let idx1;
+        let idx2;
         const events = timeline1.getEvents();
         for (let idx = 0; idx < events.length &&
              (idx1 === undefined || idx2 === undefined); idx++) {
@@ -652,9 +691,134 @@ EventTimelineSet.prototype.compareEventOrdering = function(eventId1, eventId2) {
 };
 
 /**
- * The EventTimelineSet class.
+ * Get a collection of relations to a given event in this timeline set.
+ *
+ * @param {String} eventId
+ * The ID of the event that you'd like to access relation events for.
+ * For example, with annotations, this would be the ID of the event being annotated.
+ * @param {String} relationType
+ * The type of relation involved, such as "m.annotation", "m.reference", "m.replace", etc.
+ * @param {String} eventType
+ * The relation event's type, such as "m.reaction", etc.
+ * @throws If <code>eventId</code>, <code>relationType</code> or <code>eventType</code>
+ * are not valid.
+ *
+ * @returns {?Relations}
+ * A container for relation events or undefined if there are no relation events for
+ * the relationType.
  */
-module.exports = EventTimelineSet;
+EventTimelineSet.prototype.getRelationsForEvent = function(
+    eventId, relationType, eventType,
+) {
+    if (!this._unstableClientRelationAggregation) {
+        throw new Error("Client-side relation aggregation is disabled");
+    }
+
+    if (!eventId || !relationType || !eventType) {
+        throw new Error("Invalid arguments for `getRelationsForEvent`");
+    }
+
+    // debuglog("Getting relations for: ", eventId, relationType, eventType);
+
+    const relationsForEvent = this._relations[eventId] || {};
+    const relationsWithRelType = relationsForEvent[relationType] || {};
+    return relationsWithRelType[eventType];
+};
+
+/**
+ * Set an event as the target event if any Relations exist for it already
+ *
+ * @param {MatrixEvent} event
+ * The event to check as relation target.
+ */
+EventTimelineSet.prototype.setRelationsTarget = function(event) {
+    if (!this._unstableClientRelationAggregation) {
+        return;
+    }
+
+    const relationsForEvent = this._relations[event.getId()];
+    if (!relationsForEvent) {
+        return;
+    }
+    // don't need it for non m.replace relations for now
+    const relationsWithRelType = relationsForEvent["m.replace"];
+    if (!relationsWithRelType) {
+        return;
+    }
+    // only doing replacements for messages for now (e.g. edits)
+    const relationsWithEventType = relationsWithRelType["m.room.message"];
+
+    if (relationsWithEventType) {
+        relationsWithEventType.setTargetEvent(event);
+    }
+};
+
+/**
+ * Add relation events to the relevant relation collection.
+ *
+ * @param {MatrixEvent} event
+ * The new relation event to be aggregated.
+ */
+EventTimelineSet.prototype.aggregateRelations = function(event) {
+    if (!this._unstableClientRelationAggregation) {
+        return;
+    }
+
+    if (event.isRedacted() || event.status === EventStatus.CANCELLED) {
+        return;
+    }
+
+    // If the event is currently encrypted, wait until it has been decrypted.
+    if (event.isBeingDecrypted()) {
+        event.once("Event.decrypted", () => {
+            this.aggregateRelations(event);
+        });
+        return;
+    }
+
+    const relation = event.getRelation();
+    if (!relation) {
+        return;
+    }
+
+    const relatesToEventId = relation.event_id;
+    const relationType = relation.rel_type;
+    const eventType = event.getType();
+
+    // debuglog("Aggregating relation: ", event.getId(), eventType, relation);
+
+    let relationsForEvent = this._relations[relatesToEventId];
+    if (!relationsForEvent) {
+        relationsForEvent = this._relations[relatesToEventId] = {};
+    }
+    let relationsWithRelType = relationsForEvent[relationType];
+    if (!relationsWithRelType) {
+        relationsWithRelType = relationsForEvent[relationType] = {};
+    }
+    let relationsWithEventType = relationsWithRelType[eventType];
+
+    let isNewRelations = false;
+    let relatesToEvent;
+    if (!relationsWithEventType) {
+        relationsWithEventType = relationsWithRelType[eventType] = new Relations(
+            relationType,
+            eventType,
+            this.room,
+        );
+        isNewRelations = true;
+        relatesToEvent = this.findEventById(relatesToEventId) || this.room.getPendingEvent(relatesToEventId);
+        if (relatesToEvent) {
+            relationsWithEventType.setTargetEvent(relatesToEvent);
+        }
+    }
+
+    relationsWithEventType.addEvent(event);
+
+    // only emit once event has been added to relations
+    if (isNewRelations && relatesToEvent) {
+        relatesToEvent.emit("Event.relationsCreated", relationType, eventType);
+    }
+};
 
 /**
  * Fires whenever the timeline in a room is updated.
@@ -667,7 +831,7 @@ module.exports = EventTimelineSet;
  *
  * @param {object} data  more data about the event
  *
- * @param {module:event-timeline.EventTimeline} data.timeline the timeline the
+ * @param {module:models/event-timeline.EventTimeline} data.timeline the timeline the
  * event was added to/removed from
  *
  * @param {boolean} data.liveEvent true if the event was a real-time event
