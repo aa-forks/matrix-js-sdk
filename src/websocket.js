@@ -27,7 +27,7 @@ limitations under the License.
 import {Filter} from "./filter";
 import {MatrixError} from "./http-api";
 
-const DEBUG = false;
+const DEBUG = true;
 
 function getFilterName(userId, suffix) {
     // scope this on the user ID because people may login on many accounts
@@ -322,11 +322,11 @@ WebSocketApi.prototype._start = async function(syncOptions) {
     // store syncOptions to be there for restart
     self.ws_syncOptions = syncOptions;
 
-    if (self.ws_syncToken) {
+    // if (self.ws_syncToken) {
         // we are currently reconnecting
-        this._start_websocket(qps);
-        return;
-    }
+        // this._start_websocket(qps);
+        // return;
+    // }
 
     // the initial sync might take some more time as the
     // websocket might have to respond. To avoid a connection loss
@@ -335,10 +335,9 @@ WebSocketApi.prototype._start = async function(syncOptions) {
 
     let data;
     try {
-        //debuglog('Starting sync since=' + syncToken);
-        this._currentSyncRequest = client._http.authedRequest(
-            undefined, "GET", "/sync", qps, undefined, this.opts.pollTimeout,
-        );
+        const tok = await client.store.getSavedSyncToken()
+        debuglog('Starting sync since=' + tok);
+        this._currentSyncRequest = client._syncApi._doSyncRequest(syncOptions, tok);
         data = await this._currentSyncRequest;
     } catch (e) {
         client._syncApi._startKeepAlives().then(() => {
