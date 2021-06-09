@@ -64,7 +64,7 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SERVER_SSH_KEY }}
           ARGS: "-rltDzvO"
-          SOURCE: "./element-web/webapp/"
+          SOURCE: "element-web/webapp/"
           REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
           REMOTE_PORT: ${{ secrets.REMOTE_PORT }}
           REMOTE_USER: "element-updater"
