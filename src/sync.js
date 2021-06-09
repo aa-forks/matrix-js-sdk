@@ -21,20 +21,20 @@ limitations under the License.
  * TODO:
  * This class mainly serves to take all the syncing logic out of client.js and
  * into a separate file. It's all very fluid, and this class gut wrenches a lot
- * of MatrixClient props (e.g. _http). Given we want to support WebSockets as
+ * of MatrixClient props (e.g. http). Given we want to support WebSockets as
  * an alternative syncing API, we may want to have a proper syncing interface
  * for HTTP and WS at some point.
  */
 
-import {User} from "./models/user";
-import {Room} from "./models/room";
-import {Group} from "./models/group";
+import { User } from "./models/user";
+import { Room } from "./models/room";
+import { Group } from "./models/group";
 import * as utils from "./utils";
-import {Filter} from "./filter";
-import {EventTimeline} from "./models/event-timeline";
-import {PushProcessor} from "./pushprocessor";
-import {logger} from './logger';
-import {InvalidStoreError} from './errors';
+import { Filter } from "./filter";
+import { EventTimeline } from "./models/event-timeline";
+import { PushProcessor } from "./pushprocessor";
+import { logger } from './logger';
+import { InvalidStoreError } from './errors';
 
 const DEBUG = true;
 
@@ -61,7 +61,6 @@ function debuglog(...params) {
     }
     logger.log(...params);
 }
-
 
 /**
  * <b>Internal class - unstable.</b>
@@ -188,7 +187,6 @@ SyncApi.prototype._deregisterStateListeners = function(room) {
     room.currentState.removeAllListeners("RoomState.newMember");
 };
 
-
 /**
  * Sync rooms the user has left.
  * @return {Promise} Resolved when they've been added to the store.
@@ -211,7 +209,7 @@ SyncApi.prototype.syncLeftRooms = function() {
         getFilterName(client.credentials.userId, "LEFT_ROOMS"), filter,
     ).then(function(filterId) {
         qps.filter = filterId;
-        return client._http.authedRequest(
+        return client.http.authedRequest(
             undefined, "GET", "/sync", qps, undefined, localTimeoutMs,
         );
     }).then(function(data) {
@@ -351,7 +349,7 @@ SyncApi.prototype._peekPoll = function(peekRoom, token) {
 
     const self = this;
     // FIXME: gut wrenching; hard-coded timeout values
-    this.client._http.authedRequest(undefined, "GET", "/events", {
+    this.client.http.authedRequest(undefined, "GET", "/events", {
         room_id: peekRoom.roomId,
         timeout: 30 * 1000,
         from: token,
@@ -553,7 +551,7 @@ SyncApi.prototype.sync = function() {
         }
         try {
             debuglog("Storing client options...");
-            await this.client._storeClientOptions();
+            await this.client.storeClientOptions();
             debuglog("Stored client options");
         } catch (err) {
             logger.error("Storing client options failed", err);
@@ -817,7 +815,7 @@ SyncApi.prototype._sync = async function(syncOptions) {
 
 SyncApi.prototype._doSyncRequest = function(syncOptions, syncToken) {
     const qps = this._getSyncParams(syncOptions, syncToken);
-    return this.client._http.authedRequest(
+    return this.client.http.authedRequest(
         undefined, "GET", "/sync", qps, undefined,
         qps.timeout + BUFFER_PERIOD_MS,
     );
@@ -1428,7 +1426,7 @@ SyncApi.prototype._pokeKeepAlive = function(connDidFail) {
         }
     }
 
-    this.client._http.request(
+    this.client.http.request(
         undefined, // callback
         "GET", "/_matrix/client/versions",
         undefined, // queryParams
@@ -1483,7 +1481,7 @@ SyncApi.prototype._processGroupSyncEntry = function(groupsSection, sectionName) 
             );
         }
         if (groupInfo.inviter) {
-            group.setInviter({userId: groupInfo.inviter});
+            group.setInviter({ userId: groupInfo.inviter });
         }
         group.setMyMembership(sectionName);
         if (isBrandNew) {
@@ -1673,19 +1671,9 @@ SyncApi.prototype._processEventsForNotifs = function(room, timelineEventList) {
  * @return {string}
  */
 SyncApi.prototype._getGuestFilter = function() {
-    const guestRooms = this.client._guestRooms; // FIXME: horrible gut-wrenching
-    if (!guestRooms) {
-        return "{}";
-    }
-    // we just need to specify the filter inline if we're a guest because guests
-    // can't create filters.
-    return JSON.stringify({
-        room: {
-            timeline: {
-                limit: 20,
-            },
-        },
-    });
+    // Dev note: This used to be conditional to return a filter of 20 events maximum, but
+    // the condition never went to the other branch. This is now hardcoded.
+    return "{}";
 };
 
 /**

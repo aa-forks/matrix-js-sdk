@@ -20,17 +20,18 @@ limitations under the License.
  * @module models/room
  */
 
-import {EventEmitter} from "events";
-import {EventTimelineSet} from "./event-timeline-set";
-import {EventTimeline} from "./event-timeline";
-import {getHttpUriForMxc} from "../content-repo";
+import { EventEmitter } from "events";
+import { EventTimelineSet } from "./event-timeline-set";
+import { EventTimeline } from "./event-timeline";
+import { getHttpUriForMxc } from "../content-repo";
 import * as utils from "../utils";
-import {EventStatus, MatrixEvent} from "./event";
-import {RoomMember} from "./room-member";
-import {RoomSummary} from "./room-summary";
-import {logger} from '../logger';
-import {ReEmitter} from '../ReEmitter';
-import {EventType, RoomCreateTypeField, RoomType} from "../@types/event";
+import { EventStatus, MatrixEvent } from "./event";
+import { RoomMember } from "./room-member";
+import { RoomSummary } from "./room-summary";
+import { logger } from '../logger';
+import { ReEmitter } from '../ReEmitter';
+import { EventType, RoomCreateTypeField, RoomType } from "../@types/event";
+import { normalize } from "../utils";
 
 // These constants are used as sane defaults when the homeserver doesn't support
 // the m.room_versions capability. In practice, KNOWN_SAFE_ROOM_VERSION should be
@@ -57,7 +58,6 @@ function synthesizeReceipt(userId, event, receiptType) {
     };
     return new MatrixEvent(fakeReceipt);
 }
-
 
 /**
  * Construct a new Room.
@@ -102,6 +102,7 @@ function synthesizeReceipt(userId, event, receiptType) {
  *
  * @prop {string} roomId The ID of this room.
  * @prop {string} name The human-readable display name for this room.
+ * @prop {string} normalizedName The unhomoglyphed name for this room.
  * @prop {Array<MatrixEvent>} timeline The live event timeline for this room,
  * with the oldest event at index 0. Present for backwards compatibility -
  * prefer getLiveTimeline().getEvents().
@@ -191,13 +192,13 @@ export function Room(roomId, client, myUserId, opts) {
 
     if (this._opts.pendingEventOrdering == "detached") {
         this._pendingEventList = [];
-        const serializedPendingEventList = client._sessionStore.store.getItem(pendingEventsKey(this.roomId));
+        const serializedPendingEventList = client.sessionStore.store.getItem(pendingEventsKey(this.roomId));
         if (serializedPendingEventList) {
             JSON.parse(serializedPendingEventList)
                 .forEach(async serializedEvent => {
                     const event = new MatrixEvent(serializedEvent);
                     if (event.getType() === "m.room.encrypted") {
-                        await event.attemptDecryption(this._client._crypto);
+                        await event.attemptDecryption(this._client.crypto);
                     }
                     event.setStatus(EventStatus.NOT_SENT);
                     this.addPendingEvent(event, event.getTxnId());
@@ -216,6 +217,10 @@ export function Room(roomId, client, myUserId, opts) {
     } else {
         this._membersPromise = null;
     }
+
+    // flags to stop logspam about missing m.room.create events
+    this.getTypeWarning = false;
+    this.getVersionWarning = false;
 }
 
 /**
@@ -227,7 +232,6 @@ function pendingEventsKey(roomId) {
 }
 
 utils.inherits(Room, EventEmitter);
-
 
 /**
  * Bulk decrypt critical events in a room
@@ -251,7 +255,7 @@ Room.prototype.decryptCriticalEvents = function() {
         .slice(readReceiptTimelineIndex)
         .filter(event => event.shouldAttemptDecryption())
         .reverse()
-        .map(event => event.attemptDecryption(this._client._crypto, { isRetry: true }));
+        .map(event => event.attemptDecryption(this._client.crypto, { isRetry: true }));
 
     return Promise.allSettled(decryptionPromises);
 };
@@ -268,7 +272,7 @@ Room.prototype.decryptAllEvents = function() {
         .getEvents()
         .filter(event => event.shouldAttemptDecryption())
         .reverse()
-        .map(event => event.attemptDecryption(this._client._crypto, { isRetry: true }));
+        .map(event => event.attemptDecryption(this._client.crypto, { isRetry: true }));
 
     return Promise.allSettled(decryptionPromises);
 };
@@ -280,7 +284,10 @@ Room.prototype.decryptAllEvents = function() {
 Room.prototype.getVersion = function() {
     const createEvent = this.currentState.getStateEvents("m.room.create", "");
     if (!createEvent) {
-        logger.warn("[getVersion] Room " + this.roomId + " does not have an m.room.create event");
+        if (!this.getVersionWarning) {
+            logger.warn("[getVersion] Room " + this.roomId + " does not have an m.room.create event");
+            this.getVersionWarning = true;
+        }
         return '1';
     }
     const ver = createEvent.getContent()['room_version'];
@@ -486,7 +493,6 @@ Room.prototype.getLiveTimeline = function() {
     return this.getUnfilteredTimelineSet().getLiveTimeline();
 };
 
-
 /**
  * Get the timestamp of the last message in the room
  *
@@ -625,12 +631,11 @@ Room.prototype._loadMembersFromServer = async function() {
         at: lastSyncToken,
     });
     const path = utils.encodeUri("/rooms/$roomId/members?" + queryString,
-        {$roomId: this.roomId});
-    const http = this._client._http;
+        { $roomId: this.roomId });
+    const http = this._client.http;
     const response = await http.authedRequest(undefined, "GET", path);
     return response.chunk;
 };
-
 
 Room.prototype._loadMembers = async function() {
     // were the members loaded from the server?
@@ -644,7 +649,7 @@ Room.prototype._loadMembers = async function() {
             `members from server for room ${this.roomId}`);
     }
     const memberEvents = rawMembersEvents.map(this._client.getEventMapper());
-    return {memberEvents, fromServer};
+    return { memberEvents, fromServer };
 };
 
 /**
@@ -669,7 +674,7 @@ Room.prototype.loadMembersIfNeeded = function() {
         this.currentState.setOutOfBandMembers(result.memberEvents);
         // now the members are loaded, start to track the e2e devices if needed
         if (this._client.isCryptoEnabled() && this._client.isRoomEncrypted(this.roomId)) {
-            this._client._crypto.trackRoomDevices(this.roomId);
+            this._client.crypto.trackRoomDevices(this.roomId);
         }
         return result.fromServer;
     }).catch((err) => {
@@ -1116,7 +1121,6 @@ Room.prototype.getInvitedAndJoinedMemberCount = function() {
     return calculateRoomName(this, userId, true);
  };
 
-
  /**
  * Check if the given user_id has the given membership state.
  * @param {string} userId The user ID to check.
@@ -1273,7 +1277,6 @@ Room.prototype._addLiveEvent = function(event, duplicateStrategy, fromCache) {
     }
 };
 
-
 /**
  * Add a pending outgoing event to this room.
  *
@@ -1384,7 +1387,7 @@ Room.prototype._savePendingEvents = function() {
             return isEventEncrypted || !isRoomEncrypted;
         });
 
-        const { store } = this._client._sessionStore;
+        const { store } = this._client.sessionStore;
         if (this._pendingEventList.length > 0) {
             store.setItem(
                 pendingEventsKey(this.roomId),
@@ -1684,7 +1687,6 @@ Room.prototype.removeEvent = function(eventId) {
     return removedAny;
 };
 
-
 /**
  * Recalculate various aspects of the room, including the room name and
  * room summary. Call this any time the room's current state is modified.
@@ -1720,6 +1722,7 @@ Room.prototype.recalculate = function() {
 
     const oldName = this.name;
     this.name = calculateRoomName(this, this.myUserId);
+    this.normalizedName = normalize(this.name);
     this.summary = new RoomSummary(this.roomId, {
         title: this.name,
     });
@@ -1908,7 +1911,6 @@ Room.prototype._buildReceiptCache = function(receipts) {
     return receiptCacheByEventId;
 };
 
-
 /**
  * Add a temporary local-echo receipt to the room to reflect in the
  * client the fact that we've sent one.
@@ -1966,7 +1968,6 @@ Room.prototype.getAccountData = function(type) {
     return this.accountData[type];
 };
 
-
 /**
  * Returns whether the syncing user has permission to send a message in the room
  * @return {boolean} true if the user should be permitted to send
@@ -2008,7 +2009,10 @@ Room.prototype.getJoinRule = function() {
 Room.prototype.getType = function() {
     const createEvent = this.currentState.getStateEvents("m.room.create", "");
     if (!createEvent) {
-        logger.warn("[getType] Room " + this.roomId + " does not have an m.room.create event");
+        if (!this.getTypeWarning) {
+            logger.warn("[getType] Room " + this.roomId + " does not have an m.room.create event");
+            this.getTypeWarning = true;
+        }
         return undefined;
     }
     return createEvent.getContent()[RoomCreateTypeField];

@@ -1,8 +1,8 @@
 // load olm before the sdk if possible
 import './olm-loader';
 
-import {logger} from '../src/logger';
-import {MatrixEvent} from "../src/models/event";
+import { logger } from '../src/logger';
+import { MatrixEvent } from "../src/models/event";
 
 /**
  * Return a promise that is resolved when the client next emits a
@@ -177,7 +177,6 @@ export function mkMessage(opts) {
     return mkEvent(opts);
 }
 
-
 /**
  * A mock implementation of webstorage
  *
@@ -204,7 +203,6 @@ MockStorageApi.prototype = {
     },
 };
 
-
 /**
  * If an event is being decrypted, wait for it to finish being decrypted.
  *
@@ -228,7 +226,6 @@ export function awaitDecryption(event) {
         });
     }
 }
-
 
 export function HttpResponse(
     httpLookups, acceptKeepalives, ignoreUnhandledSync,
@@ -360,12 +357,12 @@ export function setHttpResponses(
     );
 
     const httpReq = httpResponseObj.request.bind(httpResponseObj);
-    client._http = [
+    client.http = [
         "authedRequest", "authedRequestWithPrefix", "getContentUri",
         "request", "requestWithPrefix", "uploadContent",
     ].reduce((r, k) => {r[k] = jest.fn(); return r;}, {});
-    client._http.authedRequest.mockImplementation(httpReq);
-    client._http.authedRequestWithPrefix.mockImplementation(httpReq);
-    client._http.requestWithPrefix.mockImplementation(httpReq);
-    client._http.request.mockImplementation(httpReq);
+    client.http.authedRequest.mockImplementation(httpReq);
+    client.http.authedRequestWithPrefix.mockImplementation(httpReq);
+    client.http.requestWithPrefix.mockImplementation(httpReq);
+    client.http.request.mockImplementation(httpReq);
 }

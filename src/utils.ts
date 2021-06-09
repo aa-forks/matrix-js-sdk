@@ -346,6 +346,16 @@ export function removeHiddenChars(str: string): string {
     return "";
 }
 
+export function normalize(str: string): string {
+    // Note: we have to match the filter with the removeHiddenChars() because the
+    // function strips spaces and other characters (M becomes RN for example, in lowercase).
+    return removeHiddenChars(str.toLowerCase())
+        // Strip all punctuation
+        .replace(/[\\'!"#$%&()*+,\-./:;<=>?@[\]^_`{|}~\u2000-\u206f\u2e00-\u2e7f]/g, "")
+        // We also doubly convert to lowercase to work around oddities of the library.
+        .toLowerCase();
+}
+
 // Regex matching bunch of unicode control characters and otherwise misleading/invisible characters.
 // Includes:
 // various width spaces U+2000 - U+200D
@@ -388,7 +398,7 @@ export function ensureNoTrailingSlash(url: string): string {
 }
 
 // Returns a promise which resolves with a given value after the given number of ms
-export function sleep<T>(ms: number, value: T): Promise<T> {
+export function sleep<T>(ms: number, value?: T): Promise<T> {
     return new Promise((resolve => {
         setTimeout(resolve, ms, value);
     }));
@@ -408,7 +418,7 @@ export function defer() {
         reject = _reject;
     });
 
-    return {resolve, reject, promise};
+    return { resolve, reject, promise };
 }
 
 export async function promiseMapSeries<T>(

@@ -138,7 +138,7 @@ WebSocketApi.prototype.start = function() {
             client.pushRules = result;
             getFilter(); // Now get the filter and start syncing
         }, function(err) {
-            client._syncApi._startKeepAlives().then(function() {
+            client.syncApi._startKeepAlives().then(function() {
                 getPushRules();
             });
             self._updateSyncState("ERROR", { error: err });
@@ -165,7 +165,7 @@ WebSocketApi.prototype.start = function() {
 
             self._start({ filterId });
         }, function(err) {
-            client._syncApi._startKeepAlives().then(function() {
+            client.syncApi._startKeepAlives().then(function() {
                 getFilter();
             });
             self._updateSyncState("ERROR", { error: err });
@@ -180,7 +180,7 @@ WebSocketApi.prototype.start = function() {
         // for persisted /sync data and use that if present.
         client.store.getSavedSync().then((savedSync) => {
             if (savedSync) {
-                return client._syncApi._syncFromCache(savedSync);
+                return client.syncApi._syncFromCache(savedSync);
             }
         }).then(() => {
             // Get push rules and start syncing after getting the saved sync
@@ -304,7 +304,7 @@ WebSocketApi.prototype._start = async function(syncOptions) {
 
     let filterId = syncOptions.filterId;
     if (client.isGuest() && !filterId) {
-        filterId = client._syncApi._getGuestFilter();
+        filterId = client.syncApi._getGuestFilter();
     }
 
     // as the syncToken has to be present for the websocket (which run async)
@@ -337,10 +337,10 @@ WebSocketApi.prototype._start = async function(syncOptions) {
     try {
         const tok = await client.store.getSavedSyncToken()
         debuglog('Starting sync since=' + tok);
-        this._currentSyncRequest = client._syncApi._doSyncRequest(syncOptions, tok);
+        this._currentSyncRequest = client.syncApi._doSyncRequest(syncOptions, tok);
         data = await this._currentSyncRequest;
     } catch (e) {
-        client._syncApi._startKeepAlives().then(() => {
+        client.syncApi._startKeepAlives().then(() => {
             debuglog("Starting with initial sync failed (", e, "). Retries");
             this._start(syncOptions);
         });
@@ -371,7 +371,7 @@ WebSocketApi.prototype._start = async function(syncOptions) {
     }
 
     try {
-        await client._syncApi._processSyncResponse(
+        await client.syncApi._processSyncResponse(
             syncEventData, data,
         );
     } catch (e) {
@@ -407,7 +407,7 @@ WebSocketApi.prototype._start = async function(syncOptions) {
 WebSocketApi.prototype._start_websocket = function(qps) {
     const self = this;
     qps.since = this.ws_syncToken;
-    this._websocket = this.client._http.generateWebSocket(qps);
+    this._websocket = this.client.http.generateWebSocket(qps);
     this._websocket.onopen = _onopen;
     this._websocket.onclose = _onclose;
     this._websocket.onmessage = _onmessage;
@@ -445,7 +445,7 @@ WebSocketApi.prototype._start_websocket = function(qps) {
             // assume connection to websocket lost by mistake
             debuglog("Reinit Connection via WebSocket");
             self._updateSyncState("RECONNECTING");
-            self.client._syncApi._startKeepAlives().then(function() {
+            self.client.syncApi._startKeepAlives().then(function() {
                 debuglog("Restart Websocket");
                 self._start(self.ws_syncOptions);
             });
@@ -543,7 +543,7 @@ WebSocketApi.prototype.handleSync = async function(data) {
 
     await client.store.setSyncData(data);
     try {
-        client._syncApi._processSyncResponse(self.ws_syncToken, data, false);
+        client.syncApi._processSyncResponse(self.ws_syncToken, data, false);
     } catch(e) {
         // log the exception with stack if we have it, else fall back
         // to the plain description
@@ -738,5 +738,5 @@ WebSocketApi.prototype._updateSyncState = function(newState, data) {
  */
 WebSocketApi.prototype._onOnline = function() {
     debuglog("Browser thinks we are back online");
-    this.client._syncApi._startKeepAlives(0);
+    this.client.syncApi._startKeepAlives(0);
 };
