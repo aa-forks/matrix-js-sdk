@@ -65,7 +65,7 @@ jobs:
       - name: Remove old Element builds
         uses: garygrossgarten/github-action-ssh@release
         with:
-          command: bash -c 'shopt -s extglob; cd /home/element-updater/element; rm -rv !("config.json")'
+          command: sh -c 'cd /home/element-updater/element; find . ! -name "config.json" -type f -exec rm -f {} +'
           host: ${{ secrets.REMOTE_HOST }}
           port: ${{ secrets.REMOTE_PORT }}
           username: "element-updater"
