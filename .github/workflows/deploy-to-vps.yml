@@ -61,6 +61,16 @@ jobs:
           yarn reskindex
           yarn build
           
+          
+      - name: Remove old Element builds
+        uses: garygrossgarten/github-action-ssh@release
+        with:
+          command: bash -c 'cd /home/element-updater/element; rm -rv !("config.json")'
+          host: ${{ secrets.REMOTE_HOST }}
+          port: ${{ secrets.REMOTE_PORT }}
+          username: "element-updater"
+          privateKey: ${{ secrets.SERVER_SSH_KEY }}
+
       - name: Deploy to VPS
         uses: easingthemes/ssh-deploy@main
         with:
