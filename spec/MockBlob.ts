@@ -14,26 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-export interface IImageInfo {
-    size?: number;
-    mimetype?: string;
-    thumbnail_info?: { // eslint-disable-line camelcase
-        w?: number;
-        h?: number;
-        size?: number;
-        mimetype?: string;
-    };
-    w?: number;
-    h?: number;
-}
+export class MockBlob {
+    private contents: number[] = [];
 
-export enum Visibility {
-    Public = "public",
-    Private = "private",
-}
+    public constructor(private parts: ArrayLike<number>[]) {
+        parts.forEach(p => Array.from(p).forEach(e => this.contents.push(e)));
+    }
 
-export enum Preset {
-    PrivateChat = "private_chat",
-    TrustedPrivateChat = "trusted_private_chat",
-    PublicChat = "public_chat",
+    public get size(): number {
+        return this.contents.length;
+    }
 }
