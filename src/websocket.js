@@ -601,7 +601,7 @@ WebSocketApi.prototype.sendObject = function(message) {
  * TODO: Handle Timeout
  */
 WebSocketApi.prototype.sendEvent = function(event) {
-    const txnId = event._txnId ? event._txnId : this.client.makeTxnId();
+    const txnId = event.txnId ? event.txnId : this.client.makeTxnId();
 
     const message = {
         id: txnId,
