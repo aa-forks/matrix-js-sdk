@@ -24,7 +24,7 @@ import { EventEmitter } from 'events';
 
 import { logger } from '../logger';
 import { VerificationRequest } from "../crypto/verification/request/VerificationRequest";
-import { EventType, RelationType } from "../@types/event";
+import { EventType, MsgType, RelationType } from "../@types/event";
 import { Crypto } from "../crypto";
 import { deepSortedObjectEntries } from "../utils";
 
@@ -62,20 +62,24 @@ function intern(str: string): string {
 }
 
 /* eslint-disable camelcase */
-interface IContent {
+export interface IContent {
     [key: string]: any;
-    msgtype?: string;
+    msgtype?: MsgType | string;
     membership?: string;
     avatar_url?: string;
     displayname?: string;
     "m.relates_to"?: IEventRelation;
 }
 
+type StrippedState = Required<Pick<IEvent, "content" | "state_key" | "type" | "sender">>;
+
 interface IUnsigned {
     age?: number;
     prev_sender?: string;
     prev_content?: IContent;
     redacted_because?: IEvent;
+    transaction_id?: string;
+    invite_room_state?: StrippedState[];
 }
 
 export interface IEvent {
