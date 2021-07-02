@@ -306,6 +306,11 @@ export interface IMatrixClientCreateOpts extends ICreateClientOpts {
     usingExternalCrypto?: boolean;
 }
 
+export enum PendingEventOrdering {
+    Chronological = "chronological",
+    Detached = "detached",
+}
+
 export interface IStartClientOpts {
     /**
      * The event <code>limit=</code> to apply to initial sync. Default: 8.
@@ -328,7 +333,7 @@ export interface IStartClientOpts {
      * pending messages will appear in a separate list, accessbile via {@link module:models/room#getPendingEvents}.
      * Default: "chronological".
      */
-    pendingEventOrdering?: "chronological" | "detached";
+    pendingEventOrdering?: PendingEventOrdering;
 
     /**
      * The number of milliseconds to wait on /sync. Default: 30000 (30 seconds).
@@ -464,7 +469,7 @@ export class MatrixClient extends EventEmitter {
     protected roomList: RoomList;
     protected syncApi: SyncApi;
     protected websocketApi: WebSocketApi;
-    protected pushRules: any; // TODO: Types
+    public pushRules: any; // TODO: Types
     protected syncLeftRoomsPromise: Promise<Room[]>;
     protected syncedLeftRooms = false;
     protected clientOpts: IStoredClientOpts;
@@ -796,7 +801,7 @@ export class MatrixClient extends EventEmitter {
     /**
      * Called by WebSocketApi to fallback to Longpolling (SyncAPI)
      * @param {Object} opts The same Object as defined for SyncApi or WebSocketApi (to init)
-     * @param {Object} syncOptions Parameter to start syncApi._sync() with to
+     * @param {Object} syncOptions Parameter to start syncApi.sync() with to
      * not beeing forced to run initialization of the client again
      * TODO: Find a not so hacky way to implement this
      */
@@ -807,13 +812,18 @@ export class MatrixClient extends EventEmitter {
             this.syncApi = new SyncApi(this, opts);
         }
         const sync = this.syncApi;
-        sync._running = true;
+        // @ts-ignore
+        sync.running = true;
         if (global.document) {
-            sync._onOnlineBound = sync._onOnline.bind(sync);
-            global.document.addEventListener("online", sync._onOnlineBound, false);
+            // @ts-ignore
+            sync.onOnlineBound = sync.onOnline.bind(sync);
+            // @ts-ignore
+            global.document.addEventListener("online", sync.onOnlineBound, false);
         }
 
-        sync._sync(syncOptions);
+        // @ts-ignore
+        sync.opts = syncOptions;
+        sync.sync();
         this.websocketApi.stop();
         this.websocketApi = null;
 
@@ -4595,7 +4605,7 @@ export class MatrixClient extends EventEmitter {
             return Promise.resolve(false);
         }
 
-        const pendingRequest = eventTimeline._paginationRequests[dir];
+        const pendingRequest = eventTimeline.paginationRequests[dir];
 
         if (pendingRequest) {
             // already a request in progress - return the existing promise
@@ -4644,9 +4654,9 @@ export class MatrixClient extends EventEmitter {
                 }
                 return res.next_token ? true : false;
             }).finally(() => {
-                eventTimeline._paginationRequests[dir] = null;
+                eventTimeline.paginationRequests[dir] = null;
             });
-            eventTimeline._paginationRequests[dir] = promise;
+            eventTimeline.paginationRequests[dir] = promise;
         } else {
             const room = this.getRoom(eventTimeline.getRoomId());
             if (!room) {
@@ -4678,9 +4688,9 @@ export class MatrixClient extends EventEmitter {
                 }
                 return res.end != res.start;
             }).finally(() => {
-                eventTimeline._paginationRequests[dir] = null;
+                eventTimeline.paginationRequests[dir] = null;
             });
-            eventTimeline._paginationRequests[dir] = promise;
+            eventTimeline.paginationRequests[dir] = promise;
         }
 
         return promise;
