@@ -1,6 +1,6 @@
 # This is a basic workflow to help you get started with Actions
 
-name: Merge matrix-js-sdk and update Element on VPS
+name: Merge matrix-js-sdk and update Element on GitHub Pages
 
 # Controls when the action will run. 
 on:
@@ -64,25 +64,14 @@ jobs:
           yarn build
           
           
-      - name: Remove old Element builds
-        uses: garygrossgarten/github-action-ssh@release
+      - name: Deploy
+        uses: crazy-max/ghaction-github-pages@v2
         with:
-          command: sh -c 'cd /home/element-updater/element; find . ! -name "config.json" -type f -exec rm -f {} +'
-          host: ${{ secrets.REMOTE_HOST }}
-          port: ${{ secrets.REMOTE_PORT }}
-          username: "element-updater"
-          privateKey: ${{ secrets.SERVER_SSH_KEY }}
-
-      - name: Deploy to VPS
-        uses: easingthemes/ssh-deploy@main
-        with:
-          SSH_PRIVATE_KEY: ${{ secrets.SERVER_SSH_KEY }}
-          ARGS: "-rltDzvO"
-          SOURCE: "element-web/webapp/"
-          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
-          REMOTE_PORT: ${{ secrets.REMOTE_PORT }}
-          REMOTE_USER: "element-updater"
-          TARGET: ${{ secrets.REMOTE_TARGET }}
+            target_branch: gh_pages
+            build_dir: webapp
+            fqdn: element.catvibers.me
+        env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       
       - name: Push merged changes
