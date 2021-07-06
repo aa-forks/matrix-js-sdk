@@ -68,7 +68,7 @@ jobs:
         uses: crazy-max/ghaction-github-pages@v2
         with:
             target_branch: gh_pages
-            build_dir: webapp
+            build_dir: element/webapp
             fqdn: element.catvibers.me
         env:
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
