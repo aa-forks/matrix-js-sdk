@@ -65,7 +65,8 @@ import {
 import { IIdentityServerProvider } from "./@types/IIdentityServerProvider";
 import type Request from "request";
 import { MatrixScheduler } from "./scheduler";
-import { ICryptoCallbacks, ISecretStorageKeyInfo, NotificationCountType } from "./matrix";
+import { ICryptoCallbacks, NotificationCountType } from "./matrix";
+import { ISecretStorageKeyInfo } from "./crypto/api";
 import { MemoryCryptoStore } from "./crypto/store/memory-crypto-store";
 import { LocalStorageCryptoStore } from "./crypto/store/localStorage-crypto-store";
 import { IndexedDBCryptoStore } from "./crypto/store/indexeddb-crypto-store";
@@ -84,7 +85,6 @@ import {
     IEncryptedEventInfo,
     IImportRoomKeysOpts,
     IRecoveryKey,
-    ISecretStorageKey,
 } from "./crypto/api";
 import { CrossSigningInfo, DeviceTrustLevel, UserTrustLevel } from "./crypto/CrossSigning";
 import { Room } from "./models/room";
@@ -1939,7 +1939,11 @@ export class MatrixClient extends EventEmitter {
      *     keyId: {string} the ID of the key
      *     keyInfo: {object} details about the key (iv, mac, passphrase)
      */
-    public addSecretStorageKey(algorithm: string, opts: IAddSecretStorageKeyOpts, keyName?: string): ISecretStorageKey {
+    public addSecretStorageKey(
+        algorithm: string,
+        opts: IAddSecretStorageKeyOpts,
+        keyName?: string,
+    ): Promise<{keyId: string, keyInfo: ISecretStorageKeyInfo}> {
         if (!this.crypto) {
             throw new Error("End-to-end encryption disabled");
         }
@@ -1955,7 +1959,7 @@ export class MatrixClient extends EventEmitter {
      *     for. Defaults to the default key ID if not provided.
      * @return {boolean} Whether we have the key.
      */
-    public hasSecretStorageKey(keyId?: string): boolean {
+    public hasSecretStorageKey(keyId?: string): Promise<boolean> {
         if (!this.crypto) {
             throw new Error("End-to-end encryption disabled");
         }
@@ -2008,7 +2012,7 @@ export class MatrixClient extends EventEmitter {
      *     with, or null if it is not present or not encrypted with a trusted
      *     key
      */
-    public isSecretStored(name: string, checkKey: boolean): Record<string, ISecretStorageKeyInfo> {
+    public isSecretStored(name: string, checkKey: boolean): Promise<Record<string, ISecretStorageKeyInfo>> {
         if (!this.crypto) {
             throw new Error("End-to-end encryption disabled");
         }
