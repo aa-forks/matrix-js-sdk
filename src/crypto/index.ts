@@ -52,7 +52,7 @@ import { InRoomChannel, InRoomRequests } from "./verification/request/InRoomChan
 import { ToDeviceChannel, ToDeviceRequests } from "./verification/request/ToDeviceChannel";
 import { IllegalMethod } from "./verification/IllegalMethod";
 import { KeySignatureUploadError } from "../errors";
-import { decryptAES, encryptAES } from './aes';
+import { decryptAES, encryptAES, calculateKeyCheck } from './aes';
 import { DehydrationManager } from './dehydration';
 import { BackupManager } from "./backup";
 import { IStore } from "../store";
@@ -133,6 +133,7 @@ export interface IMegolmSessionData {
     session_id: string;
     session_key: string;
     algorithm: string;
+    untrusted?: boolean;
 }
 /* eslint-enable camelcase */
 
@@ -797,7 +798,7 @@ export class Crypto extends EventEmitter {
                 if (key) {
                     const privateKey = key[1];
                     builder.ssssCryptoCallbacks.addPrivateKey(keyId, keyInfo, privateKey);
-                    const { iv, mac } = await SecretStorage.calculateKeyCheck(privateKey);
+                    const { iv, mac } = await calculateKeyCheck(privateKey);
                     keyInfo.iv = iv;
                     keyInfo.mac = mac;
 
@@ -967,6 +968,20 @@ export class Crypto extends EventEmitter {
                 fixedBackupKey || sessionBackupKey,
             ));
             await builder.addSessionBackupPrivateKeyToCache(decodedBackupKey);
+        } else if (this.backupManager.getKeyBackupEnabled()) {
+            // key backup is enabled but we don't have a session backup key in SSSS: see if we have one in
+            // the cache or the user can provide one, and if so, write it to SSSS
+            const backupKey = await this.getSessionBackupPrivateKey() || await getKeyBackupPassphrase();
+            if (!backupKey) {
+                // This will require user intervention to recover from since we don't have the key
+                // backup key anywhere. The user should probably just set up a new key backup and
+                // the key for the new backup will be stored. If we hit this scenario in the wild
+                // with any frequency, we should do more than just log an error.
+                logger.error("Key backup is enabled but couldn't get key backup key!");
+                return;
+            }
+            logger.info("Got session backup key from cache/user that wasn't in SSSS: saving to SSSS");
+            await secretStorage.store("m.megolm_backup.v1", olmlib.encodeBase64(backupKey));
         }
 
         const operation = builder.buildOperation();
