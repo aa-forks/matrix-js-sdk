@@ -62,7 +62,7 @@ jobs:
           yarn
           yarn reskindex
           yarn build
-          
+          cp ./matrix-js-sdk/element-config.json ./element-web/webapp/config.json
           
       - name: Deploy
         uses: crazy-max/ghaction-github-pages@v2
