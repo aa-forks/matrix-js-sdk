@@ -3336,7 +3336,7 @@ export class MatrixClient extends EventEmitter {
             }
 
             if (!promise) {
-                if (this.useWebSockets && this.websocketApi) {
+                if (this.useWebSockets && this.websocketApi && !event.isRedaction()) {
                     promise = this.websocketApi.sendEvent(event);
                 } else {
                     promise = this.sendEventHttpRequest(event);
