@@ -613,6 +613,11 @@ WebSocketApi.prototype.sendEvent = function(event) {
         },
     };
 
+    if (event.isRedaction()) {
+        message.method = "redact";
+        message.params.redacts = event.event.redacts;
+    }
+
     if (event.isState() && event.getStateKey() && event.getStateKey().length > 0) {
         message.method = "state";
         message.param.state_key = event.getStateKey();
