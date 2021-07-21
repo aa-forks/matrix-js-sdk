@@ -129,10 +129,10 @@ export function isFunction(value: any) {
  * @throws If the object is missing keys.
  */
 // note using 'keys' here would shadow the 'keys' function defined above
-export function checkObjectHasKeys(obj: object, keys_: string[]) {
-    for (let i = 0; i < keys_.length; i++) {
-        if (!obj.hasOwnProperty(keys_[i])) {
-            throw new Error("Missing required key: " + keys_[i]);
+export function checkObjectHasKeys(obj: object, keys: string[]) {
+    for (let i = 0; i < keys.length; i++) {
+        if (!obj.hasOwnProperty(keys[i])) {
+            throw new Error("Missing required key: " + keys[i]);
         }
     }
 }
@@ -682,4 +682,14 @@ export function lexicographicCompare(a: string, b: string): number {
     // Dev note: this exists because I'm sad that you can use math operators on strings, so I've
     // hidden the operation in this function.
     return (a < b) ? -1 : ((a === b) ? 0 : 1);
+}
+
+const collator = new Intl.Collator();
+/**
+ * Performant language-sensitive string comparison
+ * @param a the first string to compare
+ * @param b the second string to compare
+ */
+export function compare(a: string, b: string): number {
+    return collator.compare(a, b);
 }
