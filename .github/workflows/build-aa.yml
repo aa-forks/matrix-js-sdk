@@ -74,7 +74,10 @@ jobs:
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             
       - name: Swap Configs
-        run: rm ./webapp/config.json && cp ../matrix-js-sdk/element-config-bigdumb.json ./webapp/config.json
+        run: |
+          cd ./element-web
+          rm ./webapp/config.json
+          cp ../matrix-js-sdk/element-config-bigdumb.json ./webapp/config.json
             
       - name: Deploy chat.bigdumb.gq
         uses: crazy-max/ghaction-github-pages@v2
