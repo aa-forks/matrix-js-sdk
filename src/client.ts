@@ -388,6 +388,11 @@ export interface IStartClientOpts {
      * This should be in the order of hours. Default: undefined.
      */
     clientWellKnownPollPeriod?: number;
+
+    /**
+     * @experimental
+     */
+    experimentalThreadSupport?: boolean;
 }
 
 export interface IStoredClientOpts extends IStartClientOpts {
