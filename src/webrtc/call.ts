@@ -128,7 +128,9 @@ export enum CallEvent {
 
     AssertedIdentityChanged = 'asserted_identity_changed',
 
-    LengthChanged = 'length_changed'
+    LengthChanged = 'length_changed',
+
+    DataChannel = 'datachannel',
 }
 
 export enum CallErrorCode {
@@ -340,6 +342,18 @@ export class MatrixCall extends EventEmitter {
      */
     public async placeVideoCall(): Promise<void> {
         await this.placeCall(true, true);
+    }
+
+    /**
+     * Create a datachannel using this call's peer connection.
+     * @param label A human readable label for this datachannel
+     * @param options An object providing configuration options for the data channel.
+     */
+    public createDataChannel(label: string, options: RTCDataChannelInit) {
+        const dataChannel = this.peerConn.createDataChannel(label, options);
+        this.emit(CallEvent.DataChannel, dataChannel);
+        logger.debug("created data channel");
+        return dataChannel;
     }
 
     public getOpponentMember(): RoomMember {
@@ -816,9 +830,7 @@ export class MatrixCall extends EventEmitter {
             for (const sender of this.screensharingSenders) {
                 this.peerConn.removeTrack(sender);
             }
-            for (const track of this.localScreensharingStream.getTracks()) {
-                track.stop();
-            }
+            this.client.getMediaHandler().stopScreensharingStream(this.localScreensharingStream);
             this.deleteFeedByStream(this.localScreensharingStream);
             return false;
         }
@@ -866,9 +878,7 @@ export class MatrixCall extends EventEmitter {
             });
             sender.replaceTrack(track);
 
-            for (const track of this.localScreensharingStream.getTracks()) {
-                track.stop();
-            }
+            this.client.getMediaHandler().stopScreensharingStream(this.localScreensharingStream);
             this.deleteFeedByStream(this.localScreensharingStream);
 
             return false;
@@ -1499,6 +1509,10 @@ export class MatrixCall extends EventEmitter {
         stream.addEventListener("removetrack", () => this.deleteFeedByStream(stream));
     };
 
+    private onDataChannel = (ev: RTCDataChannelEvent): void => {
+        this.emit(CallEvent.DataChannel, ev.channel);
+    };
+
     /**
      * This method removes all video/rtx codecs from screensharing video
      * transceivers. This is necessary since they can cause problems. Without
@@ -1751,8 +1765,14 @@ export class MatrixCall extends EventEmitter {
         logger.debug(`stopAllMedia (stream=${this.localUsermediaStream})`);
 
         for (const feed of this.feeds) {
-            for (const track of feed.stream.getTracks()) {
-                track.stop();
+            if (feed.isLocal() && feed.purpose === SDPStreamMetadataPurpose.Usermedia) {
+                this.client.getMediaHandler().stopUserMediaStream(feed.stream);
+            } else if (feed.isLocal() && feed.purpose === SDPStreamMetadataPurpose.Screenshare) {
+                this.client.getMediaHandler().stopScreensharingStream(feed.stream);
+            } else {
+                for (const track of feed.stream.getTracks()) {
+                    track.stop();
+                }
             }
         }
     }
@@ -1864,6 +1884,7 @@ export class MatrixCall extends EventEmitter {
         pc.addEventListener('icegatheringstatechange', this.onIceGatheringStateChange);
         pc.addEventListener('track', this.onTrack);
         pc.addEventListener('negotiationneeded', this.onNegotiationNeeded);
+        pc.addEventListener('datachannel', this.onDataChannel);
 
         return pc;
     }
