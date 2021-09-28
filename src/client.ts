@@ -539,7 +539,7 @@ export interface IRequestTokenResponse {
     submit_url?: string;
 }
 
-interface IRequestMsisdnTokenResponse extends IRequestTokenResponse {
+export interface IRequestMsisdnTokenResponse extends IRequestTokenResponse {
     msisdn: string;
     success: boolean;
     intl_fmt: string;
@@ -5129,7 +5129,7 @@ export class MatrixClient extends EventEmitter {
         email: string,
         clientSecret: string,
         sendAttempt: number,
-        nextLink: string,
+        nextLink?: string,
     ): Promise<IRequestTokenResponse> {
         return this.requestTokenFromEndpoint(
             "/account/3pid/email/requestToken",
@@ -5161,7 +5161,7 @@ export class MatrixClient extends EventEmitter {
         phoneNumber: string,
         clientSecret: string,
         sendAttempt: number,
-        nextLink: string,
+        nextLink?: string,
     ): Promise<IRequestMsisdnTokenResponse> {
         return this.requestTokenFromEndpoint(
             "/account/3pid/msisdn/requestToken",
