@@ -576,6 +576,10 @@ interface IRoomInitialSyncResponse {
     presence: Partial<IEvent>; // legacy and undocumented, api is deprecated so this won't get attention
 }
 
+interface IJoinedRoomsResponse {
+    joined_rooms: string[];
+}
+
 interface IJoinedMembersResponse {
     joined: {
         [userId: string]: {
@@ -6773,7 +6777,7 @@ export class MatrixClient extends EventEmitter {
      * @return {Promise} Resolves: A list of the user's current rooms
      * @return {module:http-api.MatrixError} Rejects: with an error response.
      */
-    public getJoinedRooms(): Promise<string[]> {
+    public getJoinedRooms(): Promise<IJoinedRoomsResponse> {
         const path = utils.encodeUri("/joined_rooms", {});
         return this.http.authedRequest(undefined, "GET", path);
     }
