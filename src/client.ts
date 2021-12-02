@@ -8991,6 +8991,13 @@ export class MatrixClient extends EventEmitter {
                 room.addThreadedEvent(event);
             });
     }
+
+    /**
+     * Fetches the user_id of the configured access token.
+     */
+    public async whoami(): Promise<{ user_id: string }> { // eslint-disable-line camelcase
+        return this.http.authedRequest(undefined, "GET", "/account/whoami");
+    }
 }
 
 /**
