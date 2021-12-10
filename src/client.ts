@@ -22,8 +22,8 @@ limitations under the License.
 import { EventEmitter } from "events";
 import { ReadStream } from "fs";
 
-import { WebSocketApi } from './websocket';
 import { ISyncStateData, SyncApi } from "./sync";
+import { WebSocketApi } from './websocket';
 import { EventStatus, IContent, IDecryptOptions, IEvent, MatrixEvent } from "./models/event";
 import { StubStore } from "./store/stub";
 import { createNewMatrixCall, MatrixCall } from "./webrtc/call";
