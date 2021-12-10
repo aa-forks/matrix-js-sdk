@@ -20,6 +20,8 @@ limitations under the License.
  */
 
 import { EventEmitter } from "events";
+import { ReadStream } from "fs";
+
 import { WebSocketApi } from './websocket';
 import { ISyncStateData, SyncApi } from "./sync";
 import { EventStatus, IContent, IDecryptOptions, IEvent, MatrixEvent } from "./models/event";
@@ -129,7 +131,6 @@ import {
 import { IAbortablePromise, IdServerUnbindResult, IImageInfo, Preset, Visibility } from "./@types/partials";
 import { EventMapper, eventMapperFor, MapperOpts } from "./event-mapper";
 import { randomString } from "./randomstring";
-import { ReadStream } from "fs";
 import { WebStorageSessionStore } from "./store/session/webstorage";
 import { BackupManager, IKeyBackup, IKeyBackupCheck, IPreparedKeyBackupVersion, TrustInfo } from "./crypto/backup";
 import { DEFAULT_TREE_POWER_LEVELS_TEMPLATE, MSC3089TreeSpace } from "./models/MSC3089TreeSpace";
