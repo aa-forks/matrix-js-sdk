@@ -34,8 +34,8 @@ jobs:
           
       - name: Check out repos
         run: |
-          git clone https://github.com/vector-im/element-web --single-branch
-          git clone https://github.com/matrix-org/matrix-react-sdk --single-branch
+          git clone --depth=1 https://github.com/vector-im/element-web --single-branch
+          git clone --depth=1 https://github.com/matrix-org/matrix-react-sdk --single-branch
 
       - name: Merge changes
         working-directory: "./matrix-js-sdk"
