@@ -23,7 +23,7 @@ jobs:
       - name: Setup Node.js environment
         uses: actions/setup-node@v2.1.5
         with:
-          node-version: 15
+          node-version: 17
       - name: Install yarn
         run: "npm install -g yarn"
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
