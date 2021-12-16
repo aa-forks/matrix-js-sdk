@@ -552,7 +552,7 @@ export class MatrixHttpApi {
         //TODO make query-path configuration somewhere else
         return new WebSocket(_base + "/_matrix/client/ws/r0?"
             + utils.encodeParams(_params), "m.json");
-    },
+    }
 
     /**
      * Perform an authorised request to the homeserver.
