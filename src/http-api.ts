@@ -529,7 +529,7 @@ export class MatrixHttpApi {
      * @param {string} queryParams.since Timestamp to do a differential
      * @returns {WebSocket} set up with values of queryParams of with default-values accessible by this
      */
-    generateWebSocket: function(queryParams) {
+    public generateWebSocket (queryParams?: Record<string, string | string[]>) {
         if (!queryParams) {
             queryParams = {};
         }
