@@ -2743,7 +2743,14 @@ export class MatrixClient extends EventEmitter {
         );
     }
 
-    private makeKeyBackupPath(roomId: string, sessionId: string, version: string): IKeyBackupPath {
+    private makeKeyBackupPath(roomId: undefined, sessionId: undefined, version: string): IKeyBackupPath;
+    private makeKeyBackupPath(roomId: string, sessionId: undefined, version: string): IKeyBackupPath;
+    private makeKeyBackupPath(roomId: string, sessionId: string, version: string): IKeyBackupPath;
+    private makeKeyBackupPath(
+        roomId: string | undefined,
+        sessionId: string | undefined,
+        version: string,
+    ): IKeyBackupPath {
         let path;
         if (sessionId !== undefined) {
             path = utils.encodeUri("/room_keys/keys/$roomId/$sessionId", {
@@ -2770,7 +2777,15 @@ export class MatrixClient extends EventEmitter {
      * @return {Promise} a promise that will resolve when the keys
      * are uploaded
      */
-    public sendKeyBackup(roomId: string, sessionId: string, version: string, data: IKeyBackup): Promise<void> {
+    public sendKeyBackup(roomId: undefined, sessionId: undefined, version: string, data: IKeyBackup): Promise<void>;
+    public sendKeyBackup(roomId: string, sessionId: undefined, version: string, data: IKeyBackup): Promise<void>;
+    public sendKeyBackup(roomId: string, sessionId: string, version: string, data: IKeyBackup): Promise<void>;
+    public sendKeyBackup(
+        roomId: string,
+        sessionId: string | undefined,
+        version: string | undefined,
+        data: IKeyBackup,
+    ): Promise<void> {
         if (!this.crypto) {
             throw new Error("End-to-end encryption disabled");
         }
@@ -2858,8 +2873,29 @@ export class MatrixClient extends EventEmitter {
      */
     public async restoreKeyBackupWithPassword(
         password: string,
+        targetRoomId: undefined,
+        targetSessionId: undefined,
+        backupInfo: IKeyBackupInfo,
+        opts: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    public async restoreKeyBackupWithPassword(
+        password: string,
+        targetRoomId: string,
+        targetSessionId: undefined,
+        backupInfo: IKeyBackupInfo,
+        opts: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    public async restoreKeyBackupWithPassword(
+        password: string,
         targetRoomId: string,
         targetSessionId: string,
+        backupInfo: IKeyBackupInfo,
+        opts: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    public async restoreKeyBackupWithPassword(
+        password: string,
+        targetRoomId: string | undefined,
+        targetSessionId: string | undefined,
         backupInfo: IKeyBackupInfo,
         opts: IKeyBackupRestoreOpts,
     ): Promise<IKeyBackupRestoreResult> {
@@ -2920,8 +2956,29 @@ export class MatrixClient extends EventEmitter {
      */
     public restoreKeyBackupWithRecoveryKey(
         recoveryKey: string,
+        targetRoomId: undefined,
+        targetSessionId: undefined,
+        backupInfo: IKeyBackupInfo,
+        opts: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    public restoreKeyBackupWithRecoveryKey(
+        recoveryKey: string,
+        targetRoomId: string,
+        targetSessionId: undefined,
+        backupInfo: IKeyBackupInfo,
+        opts: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    public restoreKeyBackupWithRecoveryKey(
+        recoveryKey: string,
         targetRoomId: string,
         targetSessionId: string,
+        backupInfo: IKeyBackupInfo,
+        opts: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    public restoreKeyBackupWithRecoveryKey(
+        recoveryKey: string,
+        targetRoomId: string | undefined,
+        targetSessionId: string | undefined,
         backupInfo: IKeyBackupInfo,
         opts: IKeyBackupRestoreOpts,
     ): Promise<IKeyBackupRestoreResult> {
@@ -2930,8 +2987,26 @@ export class MatrixClient extends EventEmitter {
     }
 
     public async restoreKeyBackupWithCache(
+        targetRoomId: undefined,
+        targetSessionId: undefined,
+        backupInfo: IKeyBackupInfo,
+        opts?: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    public async restoreKeyBackupWithCache(
+        targetRoomId: string,
+        targetSessionId: undefined,
+        backupInfo: IKeyBackupInfo,
+        opts?: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    public async restoreKeyBackupWithCache(
         targetRoomId: string,
         targetSessionId: string,
+        backupInfo: IKeyBackupInfo,
+        opts?: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    public async restoreKeyBackupWithCache(
+        targetRoomId: string | undefined,
+        targetSessionId: string | undefined,
         backupInfo: IKeyBackupInfo,
         opts?: IKeyBackupRestoreOpts,
     ): Promise<IKeyBackupRestoreResult> {
@@ -2944,8 +3019,29 @@ export class MatrixClient extends EventEmitter {
 
     private async restoreKeyBackup(
         privKey: ArrayLike<number>,
+        targetRoomId: undefined,
+        targetSessionId: undefined,
+        backupInfo: IKeyBackupInfo,
+        opts?: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    private async restoreKeyBackup(
+        privKey: ArrayLike<number>,
+        targetRoomId: string,
+        targetSessionId: undefined,
+        backupInfo: IKeyBackupInfo,
+        opts?: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    private async restoreKeyBackup(
+        privKey: ArrayLike<number>,
         targetRoomId: string,
         targetSessionId: string,
+        backupInfo: IKeyBackupInfo,
+        opts?: IKeyBackupRestoreOpts,
+    ): Promise<IKeyBackupRestoreResult>;
+    private async restoreKeyBackup(
+        privKey: ArrayLike<number>,
+        targetRoomId: string | undefined,
+        targetSessionId: string | undefined,
         backupInfo: IKeyBackupInfo,
         opts?: IKeyBackupRestoreOpts,
     ): Promise<IKeyBackupRestoreResult> {
@@ -3038,7 +3134,14 @@ export class MatrixClient extends EventEmitter {
         return { total: totalKeyCount, imported: keys.length };
     }
 
-    public deleteKeysFromBackup(roomId: string, sessionId: string, version: string): Promise<void> {
+    public deleteKeysFromBackup(roomId: undefined, sessionId: undefined, version: string): Promise<void>;
+    public deleteKeysFromBackup(roomId: string, sessionId: undefined, version: string): Promise<void>;
+    public deleteKeysFromBackup(roomId: string, sessionId: string, version: string): Promise<void>;
+    public deleteKeysFromBackup(
+        roomId: string | undefined,
+        sessionId: string | undefined,
+        version: string,
+    ): Promise<void> {
         if (!this.crypto) {
             throw new Error("End-to-end encryption disabled");
         }
