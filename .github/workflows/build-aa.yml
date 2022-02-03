@@ -1,6 +1,6 @@
 # This is a basic workflow to help you get started with Actions
 
-name: Merge matrix-js-sdk and update Element on GitHub Pages
+name: Merge matrix-js-sdk and update clients
 
 # Controls when the action will run. 
 on:
@@ -69,6 +69,7 @@ jobs:
           npm link matrix-js-sdk
           npm ci
           npm run build
+          cp ../matrix-js-sdk/cinny-config.json ./dist/config.json
           
       - name: Deploy element.catvibers.me
         uses: crazy-max/ghaction-github-pages@v2
