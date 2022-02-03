@@ -51,11 +51,11 @@ jobs:
         run: |
           cd matrix-js-sdk
           yarn link
-          yarn
+          yarn install --production
           cd ../matrix-react-sdk
           yarn link
           yarn link matrix-js-sdk
-          yarn
+          yarn install --production
           yarn reskindex
           cd ../element-web
           yarn link matrix-js-sdk
