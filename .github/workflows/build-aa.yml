@@ -35,6 +35,7 @@ jobs:
       - name: Check out repos
         run: |
           git clone --depth=1 https://github.com/vector-im/element-web --single-branch
+          git clone --depth=1 https://github.com/ajbura/cinny --single-branch
           git clone --depth=1 https://github.com/matrix-org/matrix-react-sdk --single-branch
 
       - name: Merge changes
@@ -63,8 +64,12 @@ jobs:
           yarn reskindex
           yarn build
           cp ../matrix-js-sdk/element-config.json ./webapp/config.json
+          cd ../cinny
+          yarn link matrix-js-sdk
+          yarn
+          yarn build
           
-      - name: Deploy
+      - name: Deploy element.catvibers.me
         uses: crazy-max/ghaction-github-pages@v2
         with:
             target_branch: gh_pages
@@ -89,6 +94,15 @@ jobs:
         env:
             GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
+      - name: Deploy cinny.catvibers.me
+        uses: crazy-max/ghaction-github-pages@v2
+        with:
+            target_branch: gh_pages
+            repo: aagithubbot/cinny.catvibers.me
+            build_dir: cinny/dist
+            fqdn: cinny.catvibers.me
+        env:
+            GITHUB_TOKEN: ${{ secrets.GH_PAT }}
       
       - name: Push merged changes
         uses: ad-m/github-push-action@master
