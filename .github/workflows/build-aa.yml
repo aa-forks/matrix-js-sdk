@@ -51,6 +51,7 @@ jobs:
         run: |
           cd matrix-js-sdk
           yarn link
+          npm link
           yarn install --production
           cd ../matrix-react-sdk
           yarn link
@@ -65,9 +66,9 @@ jobs:
           yarn build
           cp ../matrix-js-sdk/element-config.json ./webapp/config.json
           cd ../cinny
-          yarn link matrix-js-sdk
-          yarn
-          yarn build
+          npm link matrix-js-sdk
+          npm ci
+          npm run build
           
       - name: Deploy element.catvibers.me
         uses: crazy-max/ghaction-github-pages@v2
