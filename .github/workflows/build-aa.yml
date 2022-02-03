@@ -50,7 +50,7 @@ jobs:
       - name: Build Element
         run: |
           cd matrix-js-sdk
-          yarn install --production
+          yarn
           yarn build
           yarn link
           cd ../matrix-react-sdk
