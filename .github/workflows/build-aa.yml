@@ -66,8 +66,8 @@ jobs:
           yarn build
           cp ../matrix-js-sdk/element-config.json ./webapp/config.json
           cd ../cinny
-          npm link matrix-js-sdk
           npm ci
+          npm link matrix-js-sdk
           npm run build
           cp ../matrix-js-sdk/cinny-config.json ./dist/config.json
           
