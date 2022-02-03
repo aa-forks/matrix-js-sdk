@@ -55,7 +55,7 @@ jobs:
           cd ../matrix-react-sdk
           yarn link
           yarn link matrix-js-sdk
-          yarn install --production
+          yarn
           yarn reskindex
           cd ../element-web
           yarn link matrix-js-sdk
