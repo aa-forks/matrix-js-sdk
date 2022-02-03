@@ -539,9 +539,9 @@ export class MatrixHttpApi {
         }
 
         //TODO find a better way to distinguish between http and https
-        let _base = "ws://" + this.opts.baseUrl.substr("http://".length);
+        let _base = "ws://" + this.opts.baseUrl.substring("http://".length);
         if (this.opts.baseUrl.startsWith("https://")) {
-            _base = "wss://" + this.opts.baseUrl.substr("https://".length);
+            _base = "wss://" + this.opts.baseUrl.substring("https://".length);
         }
 
         const _params = {
@@ -551,7 +551,7 @@ export class MatrixHttpApi {
         };
         //TODO make query-path configuration somewhere else
         return new WebSocket(_base + "/_matrix/client/ws/r0?"
-            + utils.encodeParams(_params), "m.json");
+            + utils.encodeParams(_params as Record<string, string | number>), "m.json");
     }
 
     /**

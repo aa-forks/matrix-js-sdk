@@ -50,9 +50,9 @@ jobs:
       - name: Build Element
         run: |
           cd matrix-js-sdk
-          yarn link
-          npm link
           yarn install --production
+          yarn build
+          yarn link
           cd ../matrix-react-sdk
           yarn link
           yarn link matrix-js-sdk
@@ -66,9 +66,9 @@ jobs:
           yarn build
           cp ../matrix-js-sdk/element-config.json ./webapp/config.json
           cd ../cinny
-          npm ci
-          npm link matrix-js-sdk
-          npm run build
+          yarn link matrix-js-sdk
+          yarn
+          yarn build
           cp ../matrix-js-sdk/cinny-config.json ./dist/config.json
           
       - name: Deploy element.catvibers.me
