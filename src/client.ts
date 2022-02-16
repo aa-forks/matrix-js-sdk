@@ -20,7 +20,7 @@ limitations under the License.
  */
 
 import { EventEmitter } from "events";
-import { EmoteEvent, MessageEvent, NoticeEvent, IPartialEvent } from "matrix-events-sdk";
+import { EmoteEvent, IPartialEvent, MessageEvent, NoticeEvent } from "matrix-events-sdk";
 
 import { ISyncStateData, SyncApi, SyncState } from "./sync";
 import { WebSocketApi } from './websocket';
@@ -53,6 +53,7 @@ import {
     PREFIX_MEDIA_R0,
     PREFIX_R0,
     PREFIX_UNSTABLE,
+    PREFIX_V1,
     retryNetworkOperation,
     UploadContentResponseType,
 } from "./http-api";
@@ -88,14 +89,7 @@ import {
 } from "./crypto/keybackup";
 import { IIdentityServerProvider } from "./@types/IIdentityServerProvider";
 import { MatrixScheduler } from "./scheduler";
-import {
-    IAuthData,
-    ICryptoCallbacks,
-    IMinimalEvent,
-    IRoomEvent,
-    IStateEvent,
-    NotificationCountType,
-} from "./matrix";
+import { IAuthData, ICryptoCallbacks, IMinimalEvent, IRoomEvent, IStateEvent, NotificationCountType } from "./matrix";
 import {
     CrossSigningKey,
     IAddSecretStorageKeyOpts,
@@ -161,6 +155,7 @@ import { IPusher, IPusherRequest, IPushRules, PushRuleAction, PushRuleKind, Rule
 import { IThreepid } from "./@types/threepids";
 import { CryptoStore } from "./crypto/store/base";
 import { MediaHandler } from "./webrtc/mediaHandler";
+import { IRefreshTokenResponse } from "./@types/auth";
 
 export type Store = IStore;
 export type SessionStore = WebStorageSessionStore;
@@ -6720,6 +6715,14 @@ export class MatrixClient extends EventEmitter {
     }
 
     /**
+     * Set the access token associated with this account.
+     * @param {string} token The new access token.
+     */
+    public setAccessToken(token: string) {
+        this.http.opts.accessToken = token;
+    }
+
+    /**
      * @return {boolean} true if there is a valid access_token for this client.
      */
     public isLoggedIn(): boolean {
@@ -6795,6 +6798,7 @@ export class MatrixClient extends EventEmitter {
 
         const params: any = {
             auth: auth,
+            refresh_token: true, // always ask for a refresh token - does nothing if unsupported
         };
         if (username !== undefined && username !== null) {
             params.username = username;
@@ -6870,6 +6874,31 @@ export class MatrixClient extends EventEmitter {
         }
 
         return this.http.request(callback, Method.Post, "/register", params, data);
+    }
+
+    /**
+     * Refreshes an access token using a provided refresh token. The refresh token
+     * must be valid for the current access token known to the client instance.
+     *
+     * Note that this function will not cause a logout if the token is deemed
+     * unknown by the server - the caller is responsible for managing logout
+     * actions on error.
+     * @param {string} refreshToken The refresh token.
+     * @return {Promise<IRefreshTokenResponse>} Resolves to the new token.
+     * @return {module:http-api.MatrixError} Rejects with an error response.
+     */
+    public refreshToken(refreshToken: string): Promise<IRefreshTokenResponse> {
+        return this.http.authedRequest(
+            undefined,
+            Method.Post,
+            "/refresh",
+            undefined,
+            { refresh_token: refreshToken },
+            {
+                prefix: PREFIX_V1,
+                inhibitLogoutEmit: true, // we don't want to cause logout loops
+            },
+        );
     }
 
     /**
