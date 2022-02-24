@@ -21,8 +21,6 @@ limitations under the License.
  * @module webrtc/call
  */
 
-import { EventEmitter } from 'events';
-
 import { logger } from '../logger';
 import * as utils from '../utils';
 import { MatrixEvent } from '../models/event';
@@ -47,6 +45,7 @@ import {
 import { CallFeed } from './callFeed';
 import { MatrixClient } from "../client";
 import { ISendEventResponse } from "../@types/requests";
+import { EventEmitterEvents, TypedEventEmitter } from "../models/typed-event-emitter";
 
 // events: hangup, error(err), replaced(call), state(state, oldState)
 
@@ -241,6 +240,21 @@ function genCallID(): string {
     return Date.now().toString() + randomString(16);
 }
 
+export type CallEventHandlerMap = {
+    [CallEvent.DataChannel]: (channel: RTCDataChannel) => void;
+    [CallEvent.FeedsChanged]: (feeds: CallFeed[]) => void;
+    [CallEvent.Replaced]: (newCall: MatrixCall) => void;
+    [CallEvent.Error]: (error: CallError) => void;
+    [CallEvent.RemoteHoldUnhold]: (onHold: boolean) => void;
+    [CallEvent.LocalHoldUnhold]: (onHold: boolean) => void;
+    [CallEvent.LengthChanged]: (length: number) => void;
+    [CallEvent.State]: (state: CallState, oldState?: CallState) => void;
+    [CallEvent.Hangup]: () => void;
+    [CallEvent.AssertedIdentityChanged]: () => void;
+    /* @deprecated */
+    [CallEvent.HoldUnhold]: (onHold: boolean) => void;
+};
+
 /**
  * Construct a new Matrix Call.
  * @constructor
@@ -252,7 +266,7 @@ function genCallID(): string {
  * @param {Array<Object>} opts.turnServers Optional. A list of TURN servers.
  * @param {MatrixClient} opts.client The Matrix Client instance to send events to.
  */
-export class MatrixCall extends EventEmitter {
+export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap> {
     public roomId: string;
     public callId: string;
     public state = CallState.Fledgling;
@@ -571,9 +585,11 @@ export class MatrixCall extends EventEmitter {
     private pushNewLocalFeed(stream: MediaStream, purpose: SDPStreamMetadataPurpose, addToPeerConnection = true): void {
         const userId = this.client.getUserId();
 
-        // TODO: Find out what is going on here
-        // why do we enable audio (and only audio) tracks here? -- matthew
+        // Tracks don't always start off enabled, eg. chrome will give a disabled
+        // audio track if you ask for user media audio and already had one that
+        // you'd set to disabled (presumably because it clones them internally).
         setTracksEnabled(stream.getAudioTracks(), true);
+        setTracksEnabled(stream.getVideoTracks(), true);
 
         // We try to replace an existing feed if there already is one with the same purpose
         const existingFeed = this.getLocalFeeds().find((feed) => feed.purpose === purpose);
@@ -616,7 +632,8 @@ export class MatrixCall extends EventEmitter {
                     `id="${track.id}", ` +
                     `kind="${track.kind}", ` +
                     `streamId="${callFeed.stream.id}", ` +
-                    `streamPurpose="${callFeed.purpose}"` +
+                    `streamPurpose="${callFeed.purpose}", ` +
+                    `enabled=${track.enabled}` +
                     `) to peer connection`,
                 );
                 senderArray.push(this.peerConn.addTrack(track, callFeed.stream));
@@ -1973,7 +1990,7 @@ export class MatrixCall extends EventEmitter {
             this.peerConn.close();
         }
         if (shouldEmit) {
-            this.emit(CallEvent.Hangup, this);
+            this.emit(CallEvent.Hangup);
         }
     }
 
@@ -1995,7 +2012,7 @@ export class MatrixCall extends EventEmitter {
     }
 
     private checkForErrorListener(): void {
-        if (this.listeners("error").length === 0) {
+        if (this.listeners(EventEmitterEvents.Error).length === 0) {
             throw new Error(
                 "You MUST attach an error listener using call.on('error', function() {})",
             );
@@ -2064,6 +2081,12 @@ export class MatrixCall extends EventEmitter {
 
         try {
             const stream = await this.client.getMediaHandler().getUserMediaStream(audio, video);
+
+            // make sure all the tracks are enabled (same as pushNewLocalFeed -
+            // we probably ought to just have one code path for adding streams)
+            setTracksEnabled(stream.getAudioTracks(), true);
+            setTracksEnabled(stream.getVideoTracks(), true);
+
             const callFeed = new CallFeed({
                 client: this.client,
                 roomId: this.roomId,
