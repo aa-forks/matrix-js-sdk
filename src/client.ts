@@ -518,7 +518,7 @@ interface ITurnServer {
 }
 
 interface IServerVersions {
-    versions: string;
+    versions: string[];
     unstable_features: Record<string, boolean>;
 }
 
