@@ -9307,6 +9307,14 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         shouldLiveInThread: boolean;
         threadId?: string;
     } {
+        if (event.isThreadRoot) {
+            return {
+                shouldLiveInRoom: true,
+                shouldLiveInThread: true,
+                threadId: event.getId(),
+            };
+        }
+
         // A thread relation is always only shown in a thread
         if (event.isThreadRelation) {
             return {
