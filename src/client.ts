@@ -3804,7 +3804,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 content["m.relates_to"]["m.in_reply_to"] = {
                     "event_id": thread.lastReply((ev: MatrixEvent) => {
                         return ev.isThreadRelation && !ev.status;
-                    }),
+                    })?.getId(),
                 };
             }
         }
@@ -3860,7 +3860,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         // then listen for the remote echo of that event so that by the time
         // this event does get sent, we have the correct event_id
         const targetId = localEvent.getAssociatedId();
-        if (targetId && targetId.startsWith("~")) {
+        if (targetId?.startsWith("~")) {
             const target = room.getPendingEvents().find(e => e.getId() === targetId);
             target.once(MatrixEventEvent.LocalEventIdReplaced, () => {
                 localEvent.updateAssociatedId(target.getId());
@@ -6700,8 +6700,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     public async relations(
         roomId: string,
         eventId: string,
-        relationType: RelationType | string | null,
-        eventType: EventType | string | null,
+        relationType?: RelationType | string | null,
+        eventType?: EventType | string | null,
         opts: IRelationsRequestOpts = {},
     ): Promise<{
         originalEvent: MatrixEvent;
@@ -6724,12 +6724,10 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         let events = result.chunk.map(mapper);
         if (fetchedEventType === EventType.RoomMessageEncrypted) {
             const allEvents = originalEvent ? events.concat(originalEvent) : events;
-            await Promise.all(allEvents.map(e => {
-                if (e.isEncrypted()) {
-                    return new Promise(resolve => e.once(MatrixEventEvent.Decrypted, resolve));
-                }
-            }));
-            events = events.filter(e => e.getType() === eventType);
+            await Promise.all(allEvents.map(e => this.decryptEventIfNeeded(e)));
+            if (eventType !== null) {
+                events = events.filter(e => e.getType() === eventType);
+            }
         }
         if (originalEvent && relationType === RelationType.Replace) {
             events = events.filter(e => e.getSender() === originalEvent.getSender());
@@ -7250,8 +7248,16 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         const queryString = utils.encodeParams(opts as Record<string, string | number>);
 
         let templatedUrl = "/rooms/$roomId/relations/$eventId";
-        if (relationType !== null) templatedUrl += "/$relationType";
-        if (eventType !== null) templatedUrl += "/$eventType";
+        if (relationType !== null) {
+            templatedUrl += "/$relationType";
+            if (eventType !== null) {
+                templatedUrl += "/$eventType";
+            }
+        } else if (eventType !== null) {
+            logger.warn(`eventType: ${eventType} ignored when fetching
+            relations as relationType is null`);
+            eventType = null;
+        }
 
         const path = utils.encodeUri(
             templatedUrl + "?" + queryString, {
