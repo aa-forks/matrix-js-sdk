@@ -119,11 +119,6 @@ export interface IEventRelation {
     key?: string;
 }
 
-export interface IVisibilityEventRelation extends IEventRelation {
-    visibility: "visible" | "hidden";
-    reason?: string;
-}
-
 /**
  * When an event is a visibility change event, as per MSC3531,
  * the visibility change implied by the event.
@@ -1339,6 +1334,10 @@ export class MatrixEvent extends TypedEventEmitter<EmittedEvents, MatrixEventHan
         // as with local redaction, the replacing event might get
         // cancelled, which should be reflected on the target event.
         if (this.isRedacted() && newEvent) {
+            return;
+        }
+        // don't allow state events to be replaced using this mechanism as per MSC2676
+        if (this.isState()) {
             return;
         }
         if (this._replacingEvent !== newEvent) {

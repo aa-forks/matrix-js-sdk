@@ -145,12 +145,14 @@ describe("MatrixClient", function() {
     describe("joinRoom", function() {
         it("should no-op if you've already joined a room", function() {
             const roomId = "!foo:bar";
-            const room = new Room(roomId, userId);
+            const room = new Room(roomId, client, userId);
+            client.fetchRoomEvent = () => Promise.resolve({});
             room.addLiveEvents([
                 utils.mkMembership({
                     user: userId, room: roomId, mship: "join", event: true,
                 }),
             ]);
+            httpBackend.verifyNoOutstandingRequests();
             store.storeRoom(room);
             client.joinRoom(roomId);
             httpBackend.verifyNoOutstandingRequests();
@@ -556,9 +558,14 @@ describe("MatrixClient", function() {
     });
 
     describe("partitionThreadedEvents", function() {
+        let room;
+        beforeEach(() => {
+            room = new Room("!STrMRsukXHtqQdSeHa:matrix.org", client, userId);
+        });
+
         it("returns empty arrays when given an empty arrays", function() {
             const events = [];
-            const [timeline, threaded] = client.partitionThreadedEvents(events);
+            const [timeline, threaded] = room.partitionThreadedEvents(events);
             expect(timeline).toEqual([]);
             expect(threaded).toEqual([]);
         });
@@ -566,24 +573,24 @@ describe("MatrixClient", function() {
         it("copies pre-thread in-timeline vote events onto both timelines", function() {
             client.clientOpts = { experimentalThreadSupport: true };
 
-            const eventMessageInThread = buildEventMessageInThread();
             const eventPollResponseReference = buildEventPollResponseReference();
             const eventPollStartThreadRoot = buildEventPollStartThreadRoot();
+            const eventMessageInThread = buildEventMessageInThread(eventPollStartThreadRoot);
 
             const events = [
+                eventPollStartThreadRoot,
                 eventMessageInThread,
                 eventPollResponseReference,
-                eventPollStartThreadRoot,
             ];
             // Vote has no threadId yet
             expect(eventPollResponseReference.threadId).toBeFalsy();
 
-            const [timeline, threaded] = client.partitionThreadedEvents(events);
+            const [timeline, threaded] = room.partitionThreadedEvents(events);
 
             expect(timeline).toEqual([
                 // The message that was sent in a thread is missing
-                eventPollResponseReference,
                 eventPollStartThreadRoot,
+                eventPollResponseReference,
             ]);
 
             // The vote event has been copied into the thread
@@ -592,33 +599,34 @@ describe("MatrixClient", function() {
             expect(eventRefWithThreadId.threadId).toBeTruthy();
 
             expect(threaded).toEqual([
+                eventPollStartThreadRoot,
                 eventMessageInThread,
                 eventRefWithThreadId,
-                // Thread does not see thread root
             ]);
         });
 
         it("copies pre-thread in-timeline reactions onto both timelines", function() {
             client.clientOpts = { experimentalThreadSupport: true };
 
-            const eventMessageInThread = buildEventMessageInThread();
-            const eventReaction = buildEventReaction();
             const eventPollStartThreadRoot = buildEventPollStartThreadRoot();
+            const eventMessageInThread = buildEventMessageInThread(eventPollStartThreadRoot);
+            const eventReaction = buildEventReaction(eventPollStartThreadRoot);
 
             const events = [
+                eventPollStartThreadRoot,
                 eventMessageInThread,
                 eventReaction,
-                eventPollStartThreadRoot,
             ];
 
-            const [timeline, threaded] = client.partitionThreadedEvents(events);
+            const [timeline, threaded] = room.partitionThreadedEvents(events);
 
             expect(timeline).toEqual([
-                eventReaction,
                 eventPollStartThreadRoot,
+                eventReaction,
             ]);
 
             expect(threaded).toEqual([
+                eventPollStartThreadRoot,
                 eventMessageInThread,
                 withThreadId(eventReaction, eventPollStartThreadRoot.getId()),
             ]);
@@ -628,23 +636,24 @@ describe("MatrixClient", function() {
             client.clientOpts = { experimentalThreadSupport: true };
 
             const eventPollResponseReference = buildEventPollResponseReference();
-            const eventMessageInThread = buildEventMessageInThread();
             const eventPollStartThreadRoot = buildEventPollStartThreadRoot();
+            const eventMessageInThread = buildEventMessageInThread(eventPollStartThreadRoot);
 
             const events = [
+                eventPollStartThreadRoot,
                 eventPollResponseReference,
                 eventMessageInThread,
-                eventPollStartThreadRoot,
             ];
 
-            const [timeline, threaded] = client.partitionThreadedEvents(events);
+            const [timeline, threaded] = room.partitionThreadedEvents(events);
 
             expect(timeline).toEqual([
-                eventPollResponseReference,
                 eventPollStartThreadRoot,
+                eventPollResponseReference,
             ]);
 
             expect(threaded).toEqual([
+                eventPollStartThreadRoot,
                 withThreadId(eventPollResponseReference, eventPollStartThreadRoot.getId()),
                 eventMessageInThread,
             ]);
@@ -653,26 +662,27 @@ describe("MatrixClient", function() {
         it("copies post-thread in-timeline reactions onto both timelines", function() {
             client.clientOpts = { experimentalThreadSupport: true };
 
-            const eventReaction = buildEventReaction();
-            const eventMessageInThread = buildEventMessageInThread();
             const eventPollStartThreadRoot = buildEventPollStartThreadRoot();
+            const eventMessageInThread = buildEventMessageInThread(eventPollStartThreadRoot);
+            const eventReaction = buildEventReaction(eventPollStartThreadRoot);
 
             const events = [
-                eventReaction,
-                eventMessageInThread,
                 eventPollStartThreadRoot,
+                eventMessageInThread,
+                eventReaction,
             ];
 
-            const [timeline, threaded] = client.partitionThreadedEvents(events);
+            const [timeline, threaded] = room.partitionThreadedEvents(events);
 
             expect(timeline).toEqual([
-                eventReaction,
                 eventPollStartThreadRoot,
+                eventReaction,
             ]);
 
             expect(threaded).toEqual([
-                withThreadId(eventReaction, eventPollStartThreadRoot.getId()),
+                eventPollStartThreadRoot,
                 eventMessageInThread,
+                withThreadId(eventReaction, eventPollStartThreadRoot.getId()),
             ]);
         });
 
@@ -680,9 +690,9 @@ describe("MatrixClient", function() {
             client.clientOpts = { experimentalThreadSupport: true };
             // This is based on recording the events in a real room:
 
-            const eventMessageInThread = buildEventMessageInThread();
-            const eventPollResponseReference = buildEventPollResponseReference();
             const eventPollStartThreadRoot = buildEventPollStartThreadRoot();
+            const eventPollResponseReference = buildEventPollResponseReference();
+            const eventMessageInThread = buildEventMessageInThread(eventPollStartThreadRoot);
             const eventRoomName = buildEventRoomName();
             const eventEncryption = buildEventEncryption();
             const eventGuestAccess = buildEventGuestAccess();
@@ -693,9 +703,9 @@ describe("MatrixClient", function() {
             const eventCreate = buildEventCreate();
 
             const events = [
-                eventMessageInThread,
-                eventPollResponseReference,
                 eventPollStartThreadRoot,
+                eventPollResponseReference,
+                eventMessageInThread,
                 eventRoomName,
                 eventEncryption,
                 eventGuestAccess,
@@ -705,12 +715,12 @@ describe("MatrixClient", function() {
                 eventMember,
                 eventCreate,
             ];
-            const [timeline, threaded] = client.partitionThreadedEvents(events);
+            const [timeline, threaded] = room.partitionThreadedEvents(events);
 
             expect(timeline).toEqual([
                 // The message that was sent in a thread is missing
-                eventPollResponseReference,
                 eventPollStartThreadRoot,
+                eventPollResponseReference,
                 eventRoomName,
                 eventEncryption,
                 eventGuestAccess,
@@ -721,11 +731,95 @@ describe("MatrixClient", function() {
                 eventCreate,
             ]);
 
-            // Thread should contain only stuff that happened in the thread -
-            // no thread root, and no room state events
+            // Thread should contain only stuff that happened in the thread - no room state events
             expect(threaded).toEqual([
-                eventMessageInThread,
+                eventPollStartThreadRoot,
                 withThreadId(eventPollResponseReference, eventPollStartThreadRoot.getId()),
+                eventMessageInThread,
+            ]);
+        });
+
+        it("sends redactions of reactions to thread responses to thread timeline only", () => {
+            client.clientOpts = { experimentalThreadSupport: true };
+
+            const threadRootEvent = buildEventPollStartThreadRoot();
+            const eventMessageInThread = buildEventMessageInThread(threadRootEvent);
+            const threadedReaction = buildEventReaction(eventMessageInThread);
+            const threadedReactionRedaction = buildEventRedaction(threadedReaction);
+
+            const events = [
+                threadRootEvent,
+                eventMessageInThread,
+                threadedReaction,
+                threadedReactionRedaction,
+            ];
+
+            const [timeline, threaded] = room.partitionThreadedEvents(events);
+
+            expect(timeline).toEqual([
+                threadRootEvent,
+            ]);
+
+            expect(threaded).toEqual([
+                threadRootEvent,
+                eventMessageInThread,
+                threadedReaction,
+                threadedReactionRedaction,
+            ]);
+        });
+
+        it("sends reply to reply to thread root outside of thread to main timeline only", () => {
+            client.clientOpts = { experimentalThreadSupport: true };
+
+            const threadRootEvent = buildEventPollStartThreadRoot();
+            const eventMessageInThread = buildEventMessageInThread(threadRootEvent);
+            const directReplyToThreadRoot = buildEventReply(threadRootEvent);
+            const replyToReply = buildEventReply(directReplyToThreadRoot);
+
+            const events = [
+                threadRootEvent,
+                eventMessageInThread,
+                directReplyToThreadRoot,
+                replyToReply,
+            ];
+
+            const [timeline, threaded] = room.partitionThreadedEvents(events);
+
+            expect(timeline).toEqual([
+                threadRootEvent,
+                directReplyToThreadRoot,
+                replyToReply,
+            ]);
+
+            expect(threaded).toEqual([
+                threadRootEvent,
+                eventMessageInThread,
+            ]);
+        });
+
+        it("sends reply to thread responses to main timeline only", () => {
+            client.clientOpts = { experimentalThreadSupport: true };
+
+            const threadRootEvent = buildEventPollStartThreadRoot();
+            const eventMessageInThread = buildEventMessageInThread(threadRootEvent);
+            const replyToThreadResponse = buildEventReply(eventMessageInThread);
+
+            const events = [
+                threadRootEvent,
+                eventMessageInThread,
+                replyToThreadResponse,
+            ];
+
+            const [timeline, threaded] = room.partitionThreadedEvents(events);
+
+            expect(timeline).toEqual([
+                threadRootEvent,
+                replyToThreadResponse,
+            ]);
+
+            expect(threaded).toEqual([
+                threadRootEvent,
+                eventMessageInThread,
             ]);
         });
     });
@@ -737,16 +831,16 @@ function withThreadId(event, newThreadId) {
     return ret;
 }
 
-const buildEventMessageInThread = () => new MatrixEvent({
+const buildEventMessageInThread = (root) => new MatrixEvent({
     "age": 80098509,
     "content": {
         "algorithm": "m.megolm.v1.aes-sha2",
         "ciphertext": "ENCRYPTEDSTUFF",
         "device_id": "XISFUZSKHH",
         "m.relates_to": {
-            "event_id": "$VLS2ojbPmxb6x8ECetn45hmND6cRDcjgv-j-to9m7Vo",
+            "event_id": root.getId(),
             "m.in_reply_to": {
-                "event_id": "$VLS2ojbPmxb6x8ECetn45hmND6cRDcjgv-j-to9m7Vo",
+                "event_id": root.getId(),
             },
             "rel_type": "m.thread",
         },
@@ -784,10 +878,10 @@ const buildEventPollResponseReference = () => new MatrixEvent({
     "user_id": "@andybalaam-test1:matrix.org",
 });
 
-const buildEventReaction = () => new MatrixEvent({
+const buildEventReaction = (event) => new MatrixEvent({
     "content": {
         "m.relates_to": {
-            "event_id": "$VLS2ojbPmxb6x8ECetn45hmND6cRDcjgv-j-to9m7Vo",
+            "event_id": event.getId(),
             "key": "🤗",
             "rel_type": "m.annotation",
         },
@@ -800,6 +894,22 @@ const buildEventReaction = () => new MatrixEvent({
         "transaction_id": "m1643977249073.16",
     },
     "event_id": "$86B2b-x3LgE4DlV4y24b7UHnt72LIA3rzjvMysTtAfA",
+    "room_id": "!STrMRsukXHtqQdSeHa:matrix.org",
+});
+
+const buildEventRedaction = (event) => new MatrixEvent({
+    "content": {
+
+    },
+    "origin_server_ts": 1643977249239,
+    "sender": "@andybalaam-test1:matrix.org",
+    "redacts": event.getId(),
+    "type": "m.room.redaction",
+    "unsigned": {
+        "age": 22597,
+        "transaction_id": "m1643977249073.17",
+    },
+    "event_id": "$86B2b-x3LgE4DlV4y24b7UHnt72LIA3rzjvMysTtAfB",
     "room_id": "!STrMRsukXHtqQdSeHa:matrix.org",
 });
 
@@ -818,6 +928,29 @@ const buildEventPollStartThreadRoot = () => new MatrixEvent({
     "sender": "@andybalaam-test1:matrix.org",
     "type": "m.room.encrypted",
     "unsigned": { "age": 80108647 },
+    "user_id": "@andybalaam-test1:matrix.org",
+});
+
+const buildEventReply = (target) => new MatrixEvent({
+    "age": 80098509,
+    "content": {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": "ENCRYPTEDSTUFF",
+        "device_id": "XISFUZSKHH",
+        "m.relates_to": {
+            "m.in_reply_to": {
+                "event_id": target.getId(),
+            },
+        },
+        "sender_key": "i3N3CtG/CD2bGB8rA9fW6adLYSDvlUhf2iuU73L65Vg",
+        "session_id": "Ja11R/KG6ua0wdk8zAzognrxjio1Gm/RK2Gn6lFL804",
+    },
+    "event_id": target.getId() + Math.random(),
+    "origin_server_ts": 1643815466378,
+    "room_id": "!STrMRsukXHtqQdSeHa:matrix.org",
+    "sender": "@andybalaam-test1:matrix.org",
+    "type": "m.room.encrypted",
+    "unsigned": { "age": 80098509 },
     "user_id": "@andybalaam-test1:matrix.org",
 });
 
