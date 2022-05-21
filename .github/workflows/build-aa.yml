@@ -62,7 +62,6 @@ jobs:
           yarn link matrix-js-sdk
           yarn link matrix-react-sdk
           yarn
-          yarn reskindex
           yarn build
           cp ../matrix-js-sdk/element-config.json ./webapp/config.json
           cd ../cinny
