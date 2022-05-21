@@ -673,12 +673,13 @@ WebSocketApi.prototype.sendPresence = function(opts) {
  * @param {string} roomId ID of the room that has been read
  * @param {string} rmEventId ID of the event that has been read
  * @param {string} rrEventId the event tracked by the read receipt. This is here for
+ * @param {string} rpEventId the event tracked by the read receipt. This is here for
  * convenience because the RR and the RM are commonly updated at the same time as each
  * other. The local echo of this receipt will be done if set. Optional.
  * @return {module:client.Promise} Resolves: the empty object, {}.
  * @return {module:http-api.MatrixError} Rejects: with an error response.
  */
-WebSocketApi.prototype.sendReadMarkers = function(roomId, rmEventId, rrEventId) {
+WebSocketApi.prototype.sendReadMarkers = function(roomId, rmEventId, rrEventId, rpEventId) {
     const txnId = this.client.makeTxnId();
 
     const message = {
@@ -688,6 +689,7 @@ WebSocketApi.prototype.sendReadMarkers = function(roomId, rmEventId, rrEventId) 
             "room_id": roomId,
             "m.fully_read": rmEventId,
             "m.read": rrEventId,
+            "org.matrix.msc2285.read.private": rpEventId
         },
     };
 
