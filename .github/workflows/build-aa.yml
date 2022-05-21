@@ -31,6 +31,7 @@ jobs:
         with:
           fetch-depth: 0
           path: './matrix-js-sdk'
+          token: ${{ secrets.GH_PAT }}
           
       - name: Check out repos
         run: |
@@ -107,6 +108,6 @@ jobs:
       - name: Push merged changes
         uses: ad-m/github-push-action@master
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
           branch: ${{ github.ref }}
           directory: "./matrix-js-sdk"
