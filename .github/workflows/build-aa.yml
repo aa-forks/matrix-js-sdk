@@ -64,7 +64,11 @@ jobs:
           yarn
           yarn build
           cp ../matrix-js-sdk/element-config.json ./webapp/config.json
-          cd ../cinny
+          cd ..
+
+      - name: Build Cinny
+        run: |
+          cd ./cinny
           yarn link matrix-js-sdk
           yarn
           yarn build
