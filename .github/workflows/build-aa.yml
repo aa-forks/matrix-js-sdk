@@ -82,22 +82,6 @@ jobs:
             fqdn: element.catvibers.me
         env:
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            
-      - name: Swap Configs
-        run: |
-          cd ./element-web
-          rm ./webapp/config.json
-          cp ../matrix-js-sdk/element-config-bigdumb.json ./webapp/config.json
-            
-      - name: Deploy chat.bigdumb.gq
-        uses: crazy-max/ghaction-github-pages@v2
-        with:
-            target_branch: gh_pages
-            repo: aagithubbot/chat.bigdumb.gq
-            build_dir: element-web/webapp
-            fqdn: chat.bigdumb.gq
-        env:
-            GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
       - name: Deploy cinny.catvibers.me
         uses: crazy-max/ghaction-github-pages@v2
