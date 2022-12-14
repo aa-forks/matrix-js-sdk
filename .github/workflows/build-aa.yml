@@ -37,22 +37,10 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/vector-im/element-web --single-branch
           git clone --depth=1 https://github.com/ajbura/cinny --single-branch
-          git clone --depth=1 https://github.com/matrix-org/matrix-react-sdk --single-branch
-          git clone --depth=1 https://github.com/matrix-org/matrix-js-sdk --single-branch
           
       - name: Build Element
         run: |
-          cd matrix-js-sdk
-          yarn
-          yarn build
-          yarn link
-          cd ../matrix-react-sdk
-          yarn link
-          yarn link matrix-js-sdk
-          yarn
-          cd ../element-web
-          yarn link matrix-js-sdk
-          yarn link matrix-react-sdk
+          cd ./element-web
           yarn
           yarn build
           cp ../repo/element-config.json ./webapp/config.json
@@ -61,7 +49,6 @@ jobs:
       - name: Build Cinny
         run: |
           cd ./cinny
-          yarn link matrix-js-sdk
           yarn
           yarn build
           cp ../repo/cinny-config.json ./dist/config.json
