@@ -33,15 +33,6 @@ jobs:
           git clone --depth=1 https://github.com/ajbura/cinny --single-branch
           git clone --depth=1 https://github.com/matrix-org/matrix-react-sdk --single-branch
           git clone --depth=1 https://github.com/matrix-org/matrix-js-sdk --single-branch
-
-      - name: Merge changes
-        working-directory: "./matrix-js-sdk"
-        run: |
-          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git remote add org https://github.com/matrix-org/matrix-js-sdk
-          git fetch org
-          git merge org/develop
           
       - name: Build Element
         run: |
