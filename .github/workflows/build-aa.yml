@@ -26,18 +26,13 @@ jobs:
           node-version: 16
       - name: Install yarn
         run: "npm install -g yarn"
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
-        with:
-          fetch-depth: 0
-          path: './matrix-js-sdk'
-          token: ${{ secrets.GH_PAT }}
           
       - name: Check out repos
         run: |
           git clone --depth=1 https://github.com/vector-im/element-web --single-branch
           git clone --depth=1 https://github.com/ajbura/cinny --single-branch
           git clone --depth=1 https://github.com/matrix-org/matrix-react-sdk --single-branch
+          git clone --depth=1 https://github.com/matrix-org/matrix-js-sdk --single-branch
 
       - name: Merge changes
         working-directory: "./matrix-js-sdk"
