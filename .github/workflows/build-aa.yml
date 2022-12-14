@@ -20,6 +20,12 @@ jobs:
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
+        # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+          path: './repo'
+          token: ${{ secrets.GH_PAT }}
       - name: Setup Node.js environment
         uses: actions/setup-node@v2.1.5
         with:
@@ -49,7 +55,7 @@ jobs:
           yarn link matrix-react-sdk
           yarn
           yarn build
-          cp ../matrix-js-sdk/element-config.json ./webapp/config.json
+          cp ../repo/element-config.json ./webapp/config.json
           cd ..
 
       - name: Build Cinny
@@ -58,7 +64,7 @@ jobs:
           yarn link matrix-js-sdk
           yarn
           yarn build
-          cp ../matrix-js-sdk/cinny-config.json ./dist/config.json
+          cp ../repo/cinny-config.json ./dist/config.json
           
       - name: Deploy element.catvibers.me
         uses: crazy-max/ghaction-github-pages@v2
@@ -78,10 +84,3 @@ jobs:
             fqdn: cinny.catvibers.me
         env:
             GITHUB_TOKEN: ${{ secrets.GH_PAT }}
-      
-      - name: Push merged changes
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GH_PAT }}
-          branch: ${{ github.ref }}
-          directory: "./matrix-js-sdk"
