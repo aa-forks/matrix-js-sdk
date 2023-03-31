@@ -50,7 +50,7 @@ jobs:
         run: |
           cd ./cinny
           yarn
-          yarn build
+          NODE_OPTIONS="--max-old-space-size=10000" yarn build
           cp ../repo/cinny-config.json ./dist/config.json
           
       - name: Deploy element.catvibers.me
